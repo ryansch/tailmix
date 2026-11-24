@@ -15,7 +15,7 @@ public struct Snapshot: Equatable {
 }
 
 /// A client for tailmixd's local control API (see controlapi/client.go).
-public struct ControlClient {
+public struct ControlClient: Sendable {
     public static let defaultSocketDirectory = "/var/run/tailmix"
     public static let socketName = "tailmixd.sock"
 

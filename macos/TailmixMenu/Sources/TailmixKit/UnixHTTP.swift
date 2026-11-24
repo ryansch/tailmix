@@ -78,7 +78,7 @@ public struct HTTPResponse: Equatable {
 }
 
 /// Sends one HTTP request per connection over a Unix domain socket.
-public struct UnixHTTPTransport {
+public struct UnixHTTPTransport: Sendable {
     public var socketPath: String
     public var timeout: TimeInterval
 

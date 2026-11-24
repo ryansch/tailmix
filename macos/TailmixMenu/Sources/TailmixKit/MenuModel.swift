@@ -229,7 +229,7 @@ public struct MenuModel: Equatable {
     }
 
     /// The first DNS label, which is the machine name within its tailnet.
-    static func shortName(_ dnsName: String, fallback: String) -> String {
+    public static func shortName(_ dnsName: String, fallback: String) -> String {
         let trimmed = dnsName.hasSuffix(".") ? String(dnsName.dropLast()) : dnsName
         let first = trimmed.split(separator: ".", maxSplits: 1).first.map(String.init) ?? ""
         return first.isEmpty ? fallback : first
