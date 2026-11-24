@@ -11,7 +11,7 @@ SYSTEMCTL ?= systemctl
 SYSTEMD_UNIT_DIR ?= $(PREFIX)/lib/systemd/system
 SYSTEMD_UNIT ?= tailmixd.service
 
-.PHONY: check check-linux-network clean-linux-network check-ci ci install install-systemd install-test licenses licenses-check release-check
+.PHONY: macos-app macos-app-test check check-linux-network clean-linux-network check-ci ci install install-systemd install-test licenses licenses-check release-check
 
 check:
 	$(GO) test ./...
@@ -64,6 +64,13 @@ licenses:
 
 licenses-check:
 	./scripts/licenses.sh check
+
+# The menu bar app is a separate Swift package; see macos/TailmixMenu/README.md.
+macos-app:
+	./macos/TailmixMenu/build-app.sh
+
+macos-app-test:
+	cd macos/TailmixMenu && swift test
 
 release-check: check
 	$(GO) run github.com/goreleaser/goreleaser/v2@v2.12.7 release --snapshot --clean --parallelism 2

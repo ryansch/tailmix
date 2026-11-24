@@ -131,6 +131,22 @@ tailmix help                       # every command
 Read-only commands work without `sudo`. Policy changes apply immediately
 without restarting other profiles.
 
+## Menu bar app (macOS)
+
+`macos/TailmixMenu` is a menu bar app that connects and disconnects profiles
+and selects or turns off the exit node from any profile. Build it with
+`make macos-app`; see its [README](macos/TailmixMenu/README.md).
+
+Those changes would need `sudo`, so let your user make them by making it the
+operator:
+
+```sh
+sudo tailmix operator set    # the user who ran sudo
+```
+
+The operator may only connect and disconnect profiles and select or clear the
+exit node. Every other change still requires root.
+
 ## Updates
 
 Installs from `install.sh` update themselves: they check stable GitHub releases
