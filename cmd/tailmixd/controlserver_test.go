@@ -81,11 +81,13 @@ func TestControlServerAllowsReadsAndAuthorizesMutations(t *testing.T) {
 	}
 }
 
-func TestRequireRootForMutations(t *testing.T) {
+func TestAuthorizeMutations(t *testing.T) {
 	tests := []struct {
 		name       string
 		method     string
+		path       string
 		uid        string
+		operator   string
 		wantStatus int
 		wantCalled bool
 	}{
@@ -113,15 +115,101 @@ func TestRequireRootForMutations(t *testing.T) {
 			method:     http.MethodDelete,
 			wantStatus: http.StatusForbidden,
 		},
+		{
+			name:       "operator connects profile",
+			method:     http.MethodPost,
+			path:       "/v1/profiles/by-name/work/enable",
+			uid:        "501",
+			operator:   "501",
+			wantStatus: http.StatusNoContent,
+			wantCalled: true,
+		},
+		{
+			name:       "operator disconnects escaped profile",
+			method:     http.MethodPost,
+			path:       "/v1/profiles/by-name/my%20home/disable",
+			uid:        "501",
+			operator:   "501",
+			wantStatus: http.StatusNoContent,
+			wantCalled: true,
+		},
+		{
+			name:       "operator selects exit node",
+			method:     http.MethodPut,
+			path:       "/v1/exit-node",
+			uid:        "501",
+			operator:   "501",
+			wantStatus: http.StatusNoContent,
+			wantCalled: true,
+		},
+		{
+			name:       "operator clears exit node",
+			method:     http.MethodDelete,
+			path:       "/v1/exit-node",
+			uid:        "501",
+			operator:   "501",
+			wantStatus: http.StatusNoContent,
+			wantCalled: true,
+		},
+		{
+			name:       "operator cannot remove profile",
+			method:     http.MethodDelete,
+			path:       "/v1/profiles/by-name/work",
+			uid:        "501",
+			operator:   "501",
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			name:       "operator cannot restart profile",
+			method:     http.MethodPost,
+			path:       "/v1/profiles/by-name/work/restart",
+			uid:        "501",
+			operator:   "501",
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			name:       "operator cannot change operator",
+			method:     http.MethodPut,
+			path:       "/v1/operator",
+			uid:        "501",
+			operator:   "501",
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			name:       "operator cannot accept routes",
+			method:     http.MethodPatch,
+			path:       "/v1/routes",
+			uid:        "501",
+			operator:   "501",
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			name:       "other user cannot use operator routes",
+			method:     http.MethodPut,
+			path:       "/v1/exit-node",
+			uid:        "502",
+			operator:   "501",
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			name:       "operator routes need credentials",
+			method:     http.MethodPut,
+			path:       "/v1/exit-node",
+			wantStatus: http.StatusForbidden,
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			called := false
-			handler := requireRootForMutations(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			handler := authorizeMutations(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				called = true
 				w.WriteHeader(http.StatusNoContent)
-			}))
-			request := httptest.NewRequest(test.method, "/v1/test", nil)
+			}), func() string { return test.operator })
+			path := test.path
+			if path == "" {
+				path = "/v1/test"
+			}
+			request := httptest.NewRequest(test.method, path, nil)
 			if test.uid != "" {
 				request = request.WithContext(context.WithValue(
 					request.Context(), peerUIDContextKey{}, test.uid))

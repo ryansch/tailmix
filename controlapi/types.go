@@ -24,6 +24,19 @@ type UpdateStatus struct {
 	LastError        string `json:"lastError,omitempty"`
 }
 
+// Operator describes the non-root local user allowed to connect and
+// disconnect profiles and select the exit node. UID is empty when no operator
+// is configured.
+type Operator struct {
+	UID      string `json:"uid,omitempty"`
+	Username string `json:"username,omitempty"`
+}
+
+// SetOperatorRequest selects the operator by numeric user ID.
+type SetOperatorRequest struct {
+	UID string `json:"uid"`
+}
+
 type Error struct {
 	Code        string `json:"code"`
 	Message     string `json:"message"`

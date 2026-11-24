@@ -57,12 +57,66 @@ type UpdateBackend interface {
 	ApplyUpdate(context.Context) (UpdateStatus, error)
 }
 
+// OperatorBackend is implemented by daemons that let a configured non-root
+// user perform the operations listed by OperatorRoutes.
+type OperatorBackend interface {
+	Operator(context.Context) (Operator, error)
+	SetOperator(context.Context, SetOperatorRequest) (Operator, error)
+	ClearOperator(context.Context) (Operator, error)
+}
+
+// OperatorRoutes returns a handler whose registered patterns are exactly the
+// mutations a configured operator may perform: connecting or disconnecting a
+// profile and selecting or clearing the exit node. Use its Handler method to
+// test whether a request matches.
+func OperatorRoutes() *http.ServeMux {
+	mux := http.NewServeMux()
+	allowed := http.NotFoundHandler()
+	mux.Handle("POST /v1/profiles/by-name/{name}/enable", allowed)
+	mux.Handle("POST /v1/profiles/by-name/{name}/disable", allowed)
+	mux.Handle("PUT /v1/exit-node", allowed)
+	mux.Handle("DELETE /v1/exit-node", allowed)
+	return mux
+}
+
 func Handler(backend Backend) http.Handler {
 	mux := http.NewServeMux()
 	updates, hasUpdates := backend.(UpdateBackend)
 	updateUnavailable := func(w http.ResponseWriter) {
 		writeResult(w, nil, NewError("unsupported", "this daemon does not support automatic updates"))
 	}
+	operators, hasOperators := backend.(OperatorBackend)
+	operatorUnavailable := func(w http.ResponseWriter) {
+		writeResult(w, nil, NewError("unsupported", "this daemon does not support an operator"))
+	}
+	mux.HandleFunc("GET /v1/operator", func(w http.ResponseWriter, r *http.Request) {
+		if !hasOperators {
+			operatorUnavailable(w)
+			return
+		}
+		result, err := operators.Operator(r.Context())
+		writeResult(w, result, err)
+	})
+	mux.HandleFunc("PUT /v1/operator", func(w http.ResponseWriter, r *http.Request) {
+		if !hasOperators {
+			operatorUnavailable(w)
+			return
+		}
+		var request SetOperatorRequest
+		if !decodeRequest(w, r, &request) {
+			return
+		}
+		result, err := operators.SetOperator(r.Context(), request)
+		writeResult(w, result, err)
+	})
+	mux.HandleFunc("DELETE /v1/operator", func(w http.ResponseWriter, r *http.Request) {
+		if !hasOperators {
+			operatorUnavailable(w)
+			return
+		}
+		result, err := operators.ClearOperator(r.Context())
+		writeResult(w, result, err)
+	})
 	mux.HandleFunc("GET /v1/version", func(w http.ResponseWriter, _ *http.Request) {
 		writeResult(w, tailmixversion.GetMeta(), nil)
 	})

@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -53,6 +54,9 @@ type managementClient interface {
 	ReplaceSearchDomains(context.Context, []string) (controlapi.SearchDomains, error)
 	PatchSearchDomains(context.Context, controlapi.PatchSearchDomainsRequest) (controlapi.SearchDomains, error)
 	ClearSearchDomains(context.Context) (controlapi.SearchDomains, error)
+	Operator(context.Context) (controlapi.Operator, error)
+	SetOperator(context.Context, string) (controlapi.Operator, error)
+	ClearOperator(context.Context) (controlapi.Operator, error)
 }
 
 type usageError struct {
@@ -68,6 +72,10 @@ type dependencies struct {
 	runCLI    cliRunner
 	newClient func(string) managementClient
 	version   string
+	// getenv and lookupUser default to os.Getenv and a user.Lookup that
+	// returns the numeric user ID.
+	getenv     func(string) string
+	lookupUser func(string) (string, error)
 }
 
 func main() {
@@ -86,6 +94,14 @@ func runWithIO(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 			return controlapi.NewClient(socketDir)
 		},
 		version: tailmixversion.String(),
+		getenv:  os.Getenv,
+		lookupUser: func(name string) (string, error) {
+			u, err := user.Lookup(name)
+			if err != nil {
+				return "", err
+			}
+			return u.Uid, nil
+		},
 	})
 }
 
@@ -113,6 +129,8 @@ func runWithDependencies(ctx context.Context, args []string, deps dependencies) 
 		err = runDaemonAction(ctx, client, args[0], args[1:], deps)
 	case "update":
 		err = runUpdate(ctx, client, args[1:], deps)
+	case "operator":
+		err = runOperator(ctx, client, args[1:], deps)
 	case "profiles":
 		err = runProfiles(ctx, client, args[1:], deps)
 	case "routes":
@@ -297,6 +315,86 @@ func runUpdate(ctx context.Context, client managementClient, args []string, deps
 	}
 	writeUpdateStatus(deps.stdout, result)
 	return nil
+}
+
+func runOperator(ctx context.Context, client managementClient, args []string, deps dependencies) error {
+	if len(args) == 0 || isHelp(args[0]) {
+		fmt.Fprint(deps.stdout, operatorHelp)
+		return nil
+	}
+	action, rest := args[0], args[1:]
+	jsonOutput, err := takeBool(&rest, "--json")
+	if err != nil {
+		return err
+	}
+	var result controlapi.Operator
+	switch action {
+	case "show":
+		if err := noOperands(rest); err != nil {
+			return err
+		}
+		result, err = client.Operator(ctx)
+	case "set":
+		if len(rest) > 1 {
+			return usageError{"unexpected arguments: " + strings.Join(rest[1:], " ")}
+		}
+		var uid string
+		uid, err = resolveOperatorUID(rest, deps)
+		if err != nil {
+			return err
+		}
+		result, err = client.SetOperator(ctx, uid)
+	case "clear":
+		if err := noOperands(rest); err != nil {
+			return err
+		}
+		result, err = client.ClearOperator(ctx)
+	default:
+		return usageError{fmt.Sprintf("unknown operator command %q", action)}
+	}
+	if err != nil {
+		return err
+	}
+	if jsonOutput {
+		return writeJSON(deps.stdout, result)
+	}
+	switch {
+	case result.UID == "":
+		fmt.Fprintln(deps.stdout, "No operator is configured; only root can change tailmix.")
+	case result.Username != "":
+		fmt.Fprintf(deps.stdout, "Operator: %s (uid %s)\n", result.Username, result.UID)
+	default:
+		fmt.Fprintf(deps.stdout, "Operator: uid %s\n", result.UID)
+	}
+	return nil
+}
+
+// resolveOperatorUID returns the numeric user ID named by the optional
+// operand, which is a user name or numeric ID. Without an operand it selects
+// the user who ran sudo.
+func resolveOperatorUID(operands []string, deps dependencies) (string, error) {
+	if len(operands) == 0 {
+		uid := ""
+		if deps.getenv != nil {
+			uid = deps.getenv("SUDO_UID")
+		}
+		if uid == "" || uid == "0" {
+			return "", usageError{"name the operator user, or run this command with sudo from that user's account"}
+		}
+		return uid, nil
+	}
+	name := operands[0]
+	if name != "" && strings.Trim(name, "0123456789") == "" {
+		return name, nil
+	}
+	if deps.lookupUser == nil {
+		return "", fmt.Errorf("look up user %q: unavailable", name)
+	}
+	uid, err := deps.lookupUser(name)
+	if err != nil {
+		return "", fmt.Errorf("look up user %q: %w", name, err)
+	}
+	return uid, nil
 }
 
 func writeUpdateStatus(w io.Writer, status controlapi.UpdateStatus) {
@@ -1616,6 +1714,7 @@ Commands:
   up           Start every enabled profile
   down         Stop every profile without changing profile enablement
   update       Manage automatic binary updates
+  operator     Let one non-root user connect profiles and pick exit nodes
   profiles     Manage profile lifecycle and configuration
   routes       Accept IP routes and pin prefixes to profiles
   exit-node    Select one profile's exit node for default traffic
@@ -1663,6 +1762,17 @@ const updateHelp = `Usage:
 
 Automatic updates are enabled by default. Check queries the stable release
 channel immediately; apply installs an available update immediately.
+`
+
+const operatorHelp = `Usage:
+  tailmix operator show [--json]
+  tailmix operator set [<user>|<uid>] [--json]
+  tailmix operator clear [--json]
+
+The operator is one local non-root user who may connect and disconnect
+profiles and select or clear the exit node without sudo, for example from the
+tailmix menu bar app. Every other change still requires root. Without an
+argument, set selects the user who ran sudo.
 `
 
 const statusHelp = `Usage:

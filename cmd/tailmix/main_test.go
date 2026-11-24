@@ -42,6 +42,23 @@ type fakeManagementClient struct {
 	wireGuardName    string
 	wireGuardShields bool
 	added            []controlapi.AddProfileRequest
+	operator         controlapi.Operator
+	operatorSet      string
+	operatorCleared  bool
+}
+
+func (f *fakeManagementClient) Operator(context.Context) (controlapi.Operator, error) {
+	return f.operator, nil
+}
+func (f *fakeManagementClient) SetOperator(_ context.Context, uid string) (controlapi.Operator, error) {
+	f.operatorSet = uid
+	f.operator = controlapi.Operator{UID: uid, Username: "alice"}
+	return f.operator, nil
+}
+func (f *fakeManagementClient) ClearOperator(context.Context) (controlapi.Operator, error) {
+	f.operatorCleared = true
+	f.operator = controlapi.Operator{}
+	return f.operator, nil
 }
 
 func (f *fakeManagementClient) Version(context.Context) (tailmixversion.Meta, error) {
@@ -184,6 +201,86 @@ func TestDaemonLifecycleCommandsRejectArguments(t *testing.T) {
 	if code != 2 || !strings.Contains(stderr.String(), "unexpected arguments: now") {
 		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
 	}
+}
+
+func TestOperatorCommands(t *testing.T) {
+	run := func(t *testing.T, client *fakeManagementClient, env map[string]string, args ...string) (int, string, string) {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		deps := testDependencies(client, &stdout, &stderr, nil)
+		deps.getenv = func(key string) string { return env[key] }
+		deps.lookupUser = func(name string) (string, error) {
+			if name == "alice" {
+				return "501", nil
+			}
+			return "", errors.New("unknown user")
+		}
+		code := runWithDependencies(context.Background(), append([]string{"operator"}, args...), deps)
+		return code, stdout.String(), stderr.String()
+	}
+
+	t.Run("set defaults to sudo user", func(t *testing.T) {
+		client := &fakeManagementClient{}
+		code, stdout, stderr := run(t, client, map[string]string{"SUDO_UID": "501"}, "set")
+		if code != 0 || client.operatorSet != "501" {
+			t.Fatalf("code = %d, set = %q, stderr = %q", code, client.operatorSet, stderr)
+		}
+		if stdout != "Operator: alice (uid 501)\n" {
+			t.Fatalf("stdout = %q", stdout)
+		}
+	})
+	t.Run("set without sudo user", func(t *testing.T) {
+		client := &fakeManagementClient{}
+		code, _, stderr := run(t, client, map[string]string{"SUDO_UID": "0"}, "set")
+		if code != 2 || client.operatorSet != "" || !strings.Contains(stderr, "name the operator user") {
+			t.Fatalf("code = %d, set = %q, stderr = %q", code, client.operatorSet, stderr)
+		}
+	})
+	t.Run("set by name", func(t *testing.T) {
+		client := &fakeManagementClient{}
+		if code, _, stderr := run(t, client, nil, "set", "alice"); code != 0 || client.operatorSet != "501" {
+			t.Fatalf("code = %d, set = %q, stderr = %q", code, client.operatorSet, stderr)
+		}
+	})
+	t.Run("set by uid", func(t *testing.T) {
+		client := &fakeManagementClient{}
+		if code, _, stderr := run(t, client, nil, "set", "502"); code != 0 || client.operatorSet != "502" {
+			t.Fatalf("code = %d, set = %q, stderr = %q", code, client.operatorSet, stderr)
+		}
+	})
+	t.Run("set unknown user", func(t *testing.T) {
+		client := &fakeManagementClient{}
+		code, _, stderr := run(t, client, nil, "set", "mallory")
+		if code != 1 || client.operatorSet != "" || !strings.Contains(stderr, "unknown user") {
+			t.Fatalf("code = %d, stderr = %q", code, stderr)
+		}
+	})
+	t.Run("show none", func(t *testing.T) {
+		code, stdout, _ := run(t, &fakeManagementClient{}, nil, "show")
+		if code != 0 || !strings.Contains(stdout, "No operator") {
+			t.Fatalf("code = %d, stdout = %q", code, stdout)
+		}
+	})
+	t.Run("show json", func(t *testing.T) {
+		client := &fakeManagementClient{operator: controlapi.Operator{UID: "501", Username: "alice"}}
+		code, stdout, _ := run(t, client, nil, "show", "--json")
+		var got controlapi.Operator
+		if err := json.Unmarshal([]byte(stdout), &got); code != 0 || err != nil || got.UID != "501" {
+			t.Fatalf("code = %d, stdout = %q, err = %v", code, stdout, err)
+		}
+	})
+	t.Run("clear", func(t *testing.T) {
+		client := &fakeManagementClient{operator: controlapi.Operator{UID: "501"}}
+		if code, _, _ := run(t, client, nil, "clear"); code != 0 || !client.operatorCleared {
+			t.Fatalf("code = %d, cleared = %t", code, client.operatorCleared)
+		}
+	})
+	t.Run("rejects extra operands", func(t *testing.T) {
+		client := &fakeManagementClient{}
+		if code, _, _ := run(t, client, nil, "set", "alice", "bob"); code != 2 || client.operatorSet != "" {
+			t.Fatalf("code = %d", code)
+		}
+	})
 }
 
 func TestUpdateCommands(t *testing.T) {

@@ -379,3 +379,51 @@ type conflictBackend struct {
 func (b *conflictBackend) PatchIPRoutes(context.Context, PatchIPRoutesRequest) (IPRoutes, error) {
 	return IPRoutes{}, NewError("route_binding_conflict", "already bound")
 }
+
+type operatorBackend struct {
+	recordingBackend
+	operator Operator
+}
+
+func (b *operatorBackend) Operator(context.Context) (Operator, error) { return b.operator, nil }
+func (b *operatorBackend) SetOperator(_ context.Context, request SetOperatorRequest) (Operator, error) {
+	b.operator = Operator{UID: request.UID}
+	return b.operator, nil
+}
+func (b *operatorBackend) ClearOperator(context.Context) (Operator, error) {
+	b.operator = Operator{}
+	return b.operator, nil
+}
+
+func TestHandlerOperatorEndpoints(t *testing.T) {
+	backend := &operatorBackend{}
+	handler := Handler(backend)
+	serve := func(method, body string) (int, Operator) {
+		t.Helper()
+		request := httptest.NewRequest(method, "/v1/operator", strings.NewReader(body))
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		var got Operator
+		if response.Code == http.StatusOK {
+			if err := json.NewDecoder(response.Body).Decode(&got); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return response.Code, got
+	}
+	if code, got := serve(http.MethodPut, `{"uid":"501"}`); code != http.StatusOK || got.UID != "501" {
+		t.Fatalf("PUT = %d %+v", code, got)
+	}
+	if code, got := serve(http.MethodGet, ""); code != http.StatusOK || got.UID != "501" {
+		t.Fatalf("GET = %d %+v", code, got)
+	}
+	if code, got := serve(http.MethodDelete, ""); code != http.StatusOK || got.UID != "" {
+		t.Fatalf("DELETE = %d %+v", code, got)
+	}
+
+	unsupported := httptest.NewRecorder()
+	Handler(&recordingBackend{}).ServeHTTP(unsupported, httptest.NewRequest(http.MethodGet, "/v1/operator", nil))
+	if unsupported.Code != http.StatusBadRequest {
+		t.Fatalf("unsupported GET = %d", unsupported.Code)
+	}
+}

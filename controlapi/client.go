@@ -64,6 +64,24 @@ func (c *Client) UpdateAction(ctx context.Context, action string) (UpdateStatus,
 	return out, err
 }
 
+func (c *Client) Operator(ctx context.Context) (Operator, error) {
+	var out Operator
+	err := c.do(ctx, http.MethodGet, "/v1/operator", nil, &out)
+	return out, err
+}
+
+func (c *Client) SetOperator(ctx context.Context, uid string) (Operator, error) {
+	var out Operator
+	err := c.do(ctx, http.MethodPut, "/v1/operator", SetOperatorRequest{UID: uid}, &out)
+	return out, err
+}
+
+func (c *Client) ClearOperator(ctx context.Context) (Operator, error) {
+	var out Operator
+	err := c.do(ctx, http.MethodDelete, "/v1/operator", nil, &out)
+	return out, err
+}
+
 func (c *Client) Profiles(ctx context.Context, all bool) (Profiles, error) {
 	var out Profiles
 	err := c.do(ctx, http.MethodGet, "/v1/profiles?all="+strconv.FormatBool(all), nil, &out)

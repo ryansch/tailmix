@@ -44,7 +44,11 @@ func startControlServer(ctx context.Context, socketDir string, backend controlap
 	handler := controlapi.Handler(backend)
 	httpServer := &http.Server{Handler: handler}
 	if safesocket.PlatformUsesPeerCreds() {
-		httpServer.Handler = requireRootForMutations(handler)
+		operatorUID := func() string { return "" }
+		if source, ok := backend.(operatorSource); ok {
+			operatorUID = source.operatorUID
+		}
+		httpServer.Handler = authorizeMutations(handler, operatorUID)
 		httpServer.ConnContext = controlConnContext
 	}
 	server := &controlServer{
@@ -79,14 +83,27 @@ func controlConnContext(ctx context.Context, conn net.Conn) context.Context {
 	return context.WithValue(ctx, peerUIDContextKey{}, uid)
 }
 
-func requireRootForMutations(next http.Handler) http.Handler {
+// operatorSource reports the configured operator's numeric user ID, or "".
+type operatorSource interface {
+	operatorUID() string
+}
+
+// authorizeMutations allows reads from anyone, every mutation from root, and
+// the mutations in controlapi.OperatorRoutes from the configured operator.
+func authorizeMutations(next http.Handler, operatorUID func() string) http.Handler {
+	operatorRoutes := controlapi.OperatorRoutes()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			next.ServeHTTP(w, r)
 			return
 		}
 		uid, _ := r.Context().Value(peerUIDContextKey{}).(string)
-		if uid != "0" {
+		allowed := uid == "0"
+		if !allowed && uid != "" && uid == operatorUID() {
+			_, pattern := operatorRoutes.Handler(r)
+			allowed = pattern != ""
+		}
+		if !allowed {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusForbidden)
 			_ = json.NewEncoder(w).Encode(controlapi.NewError(

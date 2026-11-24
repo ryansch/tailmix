@@ -641,13 +641,21 @@ Local read requests use the normal local socket access policy, so commands such
 as `tailmix status` and the various `list` commands do not require root.
 Mutations require the connecting UID to be root. The server checks peer
 credentials rather than relying on filesystem mode alone. On platforms without
-Unix peer credentials, the socket remains owner-only. A future daemon-wide
-operator setting can widen mutation access without changing the API.
+Unix peer credentials, the socket remains owner-only.
+
+Root can name one non-root operator UID (`tailmix operator set`). The operator
+may also connect and disconnect profiles (`enable`, `disable`) and select or
+clear the exit node, which is what the macOS menu bar app needs. Every other
+mutation, including changing the operator, still requires root.
 
 ### Endpoints
 
 ```text
 GET    /v1/version
+
+GET    /v1/operator
+PUT    /v1/operator
+DELETE /v1/operator
 
 GET    /v1/profiles
 POST   /v1/profiles

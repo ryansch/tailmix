@@ -35,6 +35,9 @@ type State struct {
 	SearchDomains    []string          `json:"searchDomains,omitempty"`
 	ExitNode         *ExitNode         `json:"exitNode,omitempty"`
 	Updates          UpdateState       `json:"updates,omitempty"`
+	// OperatorUID is the numeric user ID of a non-root local user allowed to
+	// connect and disconnect profiles and select the exit node.
+	OperatorUID string `json:"operatorUid,omitempty"`
 }
 
 type Profile struct {
