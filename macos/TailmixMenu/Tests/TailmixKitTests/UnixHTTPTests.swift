@@ -1,43 +1,43 @@
 import Foundation
-import XCTest
+import Testing
 @testable import TailmixKit
 
-final class HTTPResponseTests: XCTestCase {
-    func testContentLength() throws {
+@Suite struct HTTPResponseTests {
+    @Test func testContentLength() throws {
         let response = try HTTPResponse.parse(Data("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Type: application/json\r\n\r\n{}trailing".utf8))
-        XCTAssertEqual(response.status, 200)
-        XCTAssertEqual(response.headers["content-type"], "application/json")
-        XCTAssertEqual(String(decoding: response.body, as: UTF8.self), "{}")
+        #expect(response.status == 200)
+        #expect(response.headers["content-type"] == "application/json")
+        #expect(String(decoding: response.body, as: UTF8.self) == "{}")
     }
 
-    func testChunked() throws {
+    @Test func testChunked() throws {
         let raw = "HTTP/1.1 403 Forbidden\r\nTransfer-Encoding: chunked\r\n\r\n4\r\n{\"a\"\r\n5;ext=1\r\n:true\r\n1\r\n}\r\n0\r\n\r\n"
         let response = try HTTPResponse.parse(Data(raw.utf8))
-        XCTAssertEqual(response.status, 403)
-        XCTAssertEqual(String(decoding: response.body, as: UTF8.self), "{\"a\":true}")
+        #expect(response.status == 403)
+        #expect(String(decoding: response.body, as: UTF8.self) == "{\"a\":true}")
     }
 
-    func testCloseDelimited() throws {
+    @Test func testCloseDelimited() throws {
         let response = try HTTPResponse.parse(Data("HTTP/1.0 200 OK\r\n\r\nhello".utf8))
-        XCTAssertEqual(String(decoding: response.body, as: UTF8.self), "hello")
+        #expect(String(decoding: response.body, as: UTF8.self) == "hello")
     }
 
-    func testRejectsInvalidResponses() {
-        XCTAssertThrowsError(try HTTPResponse.parse(Data("HTTP/1.1 200 OK\r\n".utf8)))
-        XCTAssertThrowsError(try HTTPResponse.parse(Data("SSH-2.0\r\n\r\n".utf8)))
-        XCTAssertThrowsError(try HTTPResponse.parse(Data("HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nshort".utf8)))
-        XCTAssertThrowsError(try HTTPResponse.parse(Data("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n".utf8)))
+    @Test func testRejectsInvalidResponses() {
+        #expect(throws: (any Error).self) { try HTTPResponse.parse(Data("HTTP/1.1 200 OK\r\n".utf8)) }
+        #expect(throws: (any Error).self) { try HTTPResponse.parse(Data("SSH-2.0\r\n\r\n".utf8)) }
+        #expect(throws: (any Error).self) { try HTTPResponse.parse(Data("HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nshort".utf8)) }
+        #expect(throws: (any Error).self) { try HTTPResponse.parse(Data("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n".utf8)) }
     }
 
-    func testProfilePathEscapesLikeGo() {
-        XCTAssertEqual(ControlClient.profilePath("work"), "/v1/profiles/by-name/work")
-        XCTAssertEqual(ControlClient.profilePath("my home/2"), "/v1/profiles/by-name/my%20home%2F2")
-        XCTAssertEqual(ControlClient.profilePath("café"), "/v1/profiles/by-name/caf%C3%A9")
+    @Test func testProfilePathEscapesLikeGo() {
+        #expect(ControlClient.profilePath("work") == "/v1/profiles/by-name/work")
+        #expect(ControlClient.profilePath("my home/2") == "/v1/profiles/by-name/my%20home%2F2")
+        #expect(ControlClient.profilePath("café") == "/v1/profiles/by-name/caf%C3%A9")
     }
 }
 
-final class ControlClientTests: XCTestCase {
-    func testReadsSnapshotAndSendsMutations() throws {
+@Suite struct ControlClientTests {
+    @Test func testReadsSnapshotAndSendsMutations() throws {
         let server = try FakeDaemon { request in
             switch (request.method, request.path) {
             case ("GET", "/v1/status"): return (200, Fixtures.status)
@@ -53,25 +53,24 @@ final class ControlClientTests: XCTestCase {
         let client = ControlClient(socketDirectory: server.directory, timeout: 5)
 
         let snapshot = try client.snapshot()
-        XCTAssertEqual(snapshot.status.profiles.count, 3)
-        XCTAssertEqual(snapshot.exitNodes.available.count, 2)
-        XCTAssertEqual(snapshot.operatorInfo, Operator(uid: "501", username: "alice"))
+        #expect(snapshot.status.profiles.count == 3)
+        #expect(snapshot.exitNodes.available.count == 2)
+        #expect(snapshot.operatorInfo == Operator(uid: "501", username: "alice"))
 
         let profile = try client.setProfileConnected("my work", true)
-        XCTAssertTrue(profile.enabled)
+        #expect(profile.enabled)
 
         try client.setExitNode(profileName: "home", nodeID: "nDE")
         let put = server.requests.first { $0.method == "PUT" }
-        XCTAssertEqual(put?.contentType, "application/json")
+        #expect(put?.contentType == "application/json")
         let body = try JSONSerialization.jsonObject(with: put?.body ?? Data()) as? [String: String]
-        XCTAssertEqual(body, ["profileName": "home", "peer": "nDE"])
+        #expect(body == ["profileName": "home", "peer": "nDE"])
 
-        XCTAssertThrowsError(try client.clearExitNode()) { error in
-            XCTAssertEqual((error as? APIError)?.isPermissionDenied, true)
-        }
+        let error = try #require(throws: (any Error).self) { try client.clearExitNode() }
+        #expect((error as? APIError)?.isPermissionDenied == true)
     }
 
-    func testOldDaemonWithoutOperator() throws {
+    @Test func testOldDaemonWithoutOperator() throws {
         let server = try FakeDaemon { request in
             switch request.path {
             case "/v1/status": return (200, Fixtures.status)
@@ -81,13 +80,12 @@ final class ControlClientTests: XCTestCase {
         }
         defer { server.stop() }
         let snapshot = try ControlClient(socketDirectory: server.directory, timeout: 5).snapshot()
-        XCTAssertNil(snapshot.operatorInfo)
+        #expect(snapshot.operatorInfo == nil)
     }
 
-    func testMissingSocketIsTransportError() {
+    @Test func testMissingSocketIsTransportError() throws {
         let client = ControlClient(socketDirectory: "/nonexistent-tailmix-dir", timeout: 1)
-        XCTAssertThrowsError(try client.status()) { error in
-            XCTAssertTrue(error is TransportError, "\(error)")
-        }
+        let error = try #require(throws: (any Error).self) { try client.status() }
+        #expect(error is TransportError, "\(error)")
     }
 }

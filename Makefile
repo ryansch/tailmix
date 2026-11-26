@@ -69,8 +69,12 @@ licenses-check:
 macos-app:
 	./macos/TailmixMenu/build-app.sh
 
+# The tests use Swift Testing. Inside the Flox environment swift test can't
+# find the Testing macro plugin, so point it there.
+SWIFT_TESTING_PLUGINS := $(shell d="$$(xcode-select -p 2>/dev/null)/usr/lib/swift/host/plugins/testing"; [ -d "$$d" ] && echo "$$d")
+
 macos-app-test:
-	cd macos/TailmixMenu && swift test
+	cd macos/TailmixMenu && swift test $(if $(SWIFT_TESTING_PLUGINS),-Xswiftc -plugin-path -Xswiftc $(SWIFT_TESTING_PLUGINS))
 
 release-check: check
 	$(GO) run github.com/goreleaser/goreleaser/v2@v2.12.7 release --snapshot --clean --parallelism 2

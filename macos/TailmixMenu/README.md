@@ -54,7 +54,8 @@ The package has two targets:
 
 - `TailmixKit` contains the control API client, its JSON models and the menu
   model. It does not depend on AppKit, so its tests also run on Linux:
-  `make macos-app-test`.
+  `make macos-app-test`. The tests use Swift Testing, so they run with the
+  Command Line Tools alone; Xcode isn't needed.
 - `TailmixMenu` contains the AppKit status item and menu.
 
 To use another daemon socket directory, run
