@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -431,5 +432,43 @@ func TestCloneStateDeepCopiesLocation(t *testing.T) {
 	}
 	if got.Current != state.LocationHome {
 		t.Fatalf("original Current changed: %q", got.Current)
+	}
+}
+
+func TestProjectProfileKeyExpiry(t *testing.T) {
+	s := newLifecycleTestSupervisor(t, lifecycleTestState())
+	expiry := time.Date(2026, 11, 25, 9, 30, 0, 0, time.UTC)
+	status := tailmixprofile.Status{ProfileID: "p_work", BackendState: "NeedsLogin", KeyExpiry: &expiry, KeyExpired: true}
+	s.runtimes["p_work"] = &managedProfile{runtime: runtimeProfile{Engine: &lifecycleEngine{status: status}}, status: status}
+	var work state.Profile
+	for _, configured := range s.st.Profiles {
+		if configured.ID == "p_work" {
+			work = configured
+		}
+	}
+
+	got := s.projectProfileLocked(work)
+	if got.KeyExpiry == nil || !got.KeyExpiry.Equal(expiry) || !got.KeyExpired {
+		t.Fatalf("projected key expiry = %v, expired = %v; want %v, true", got.KeyExpiry, got.KeyExpired, expiry)
+	}
+	if got.KeyExpiry == status.KeyExpiry {
+		t.Fatal("projected KeyExpiry aliases the engine status")
+	}
+	raw, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(raw, []byte(`"keyExpiry":"2026-11-25T09:30:00Z"`)) || !bytes.Contains(raw, []byte(`"keyExpired":true`)) {
+		t.Fatalf("JSON = %s, want keyExpiry and keyExpired", raw)
+	}
+
+	unset := tailmixprofile.Status{ProfileID: "p_work", BackendState: "Running"}
+	s.runtimes["p_work"].status = unset
+	raw, err = json.Marshal(s.projectProfileLocked(work))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(raw, []byte("keyExpir")) {
+		t.Fatalf("JSON = %s, want keyExpiry and keyExpired omitted", raw)
 	}
 }

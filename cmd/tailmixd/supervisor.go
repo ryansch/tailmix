@@ -60,10 +60,11 @@ type daemonConfig struct {
 }
 
 type managedProfile struct {
-	runtime     runtimeProfile
-	cancel      context.CancelFunc
-	status      tailmixprofile.Status
-	statusFresh bool
+	runtime      runtimeProfile
+	cancel       context.CancelFunc
+	status       tailmixprofile.Status
+	statusFresh  bool
+	loginStarted bool // a sign-in was started this NeedsLogin episode
 }
 
 type runtimeUpdate struct {
@@ -101,7 +102,8 @@ type supervisor struct {
 	updateMu      sync.Mutex
 	updateWake    chan struct{}
 	updateRestart chan updateRestart
-	operator      atomic.Value // string; see operatorUID
+	operator      atomic.Value   // string; see operatorUID
+	loginStarts   sync.WaitGroup // running sign-in starts; see startPendingLoginsLocked
 
 	// Network location; see location.go. seenGateways is guarded by mu.
 	locationTracker     *netlocation.Tracker
@@ -482,6 +484,7 @@ func (s *supervisor) reconcileLocked() (err error) {
 		}
 	}()
 	observedStatuses := s.statusesLocked()
+	s.startPendingLoginsLocked(observedStatuses)
 	s.ipPolicy = routingpolicy.BuildIP(s.st, observedStatuses)
 	s.dnsPolicy = routingpolicy.BuildDNS(s.st, observedStatuses)
 	if err := s.setRoutePreferencesLocked(); err != nil {
@@ -643,6 +646,7 @@ func (s *supervisor) statusesLocked() []tailmixprofile.Status {
 		}
 	}
 	sort.Slice(statuses, func(i, j int) bool { return statuses[i].ProfileID < statuses[j].ProfileID })
+	s.recordKeyExpiriesLocked()
 	return statuses
 }
 
@@ -820,6 +824,10 @@ func cloneState(st state.State) state.State {
 			st.Profiles[i].WireGuard = &cfg
 		}
 		st.Profiles[i].Location = st.Profiles[i].Location.Clone()
+		if t := st.Profiles[i].LastKeyExpiry; t != nil {
+			expiry := *t
+			st.Profiles[i].LastKeyExpiry = &expiry
+		}
 	}
 	st.Leases = append([]state.EffectiveLease(nil), st.Leases...)
 	st.IPRouteBindings = append([]state.IPRouteBinding(nil), st.IPRouteBindings...)
@@ -907,6 +915,7 @@ func (s *supervisor) projectProfileLocked(configured state.Profile) controlapi.P
 		result.PeerCount = status.PeerCount
 		result.ShieldsUp = status.ShieldsUp
 		result.AuthURL = status.AuthURL
+		result.KeyExpiry, result.KeyExpired = projectKeyExpiry(status, configured.LastKeyExpiry, s.now())
 		if engineApplyDegraded(managed.runtime.Engine) {
 			result.RuntimeState = "error"
 		} else if status.BackendState == "Running" {

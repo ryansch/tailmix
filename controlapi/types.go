@@ -70,6 +70,8 @@ type Profile struct {
 	PeerCount              int                     `json:"peerCount"`
 	ShieldsUp              bool                    `json:"shieldsUp"`
 	AuthURL                string                  `json:"authUrl,omitempty"`
+	KeyExpiry              *time.Time              `json:"keyExpiry,omitempty"`  // nil: never expires or unknown
+	KeyExpired             bool                    `json:"keyExpired,omitempty"` // needs login because the node key expired
 	LocalAPISocket         string                  `json:"localApiSocket,omitempty"`
 	AvailableRoutes        []AvailableIPRoute      `json:"availableRoutes,omitempty"`
 	AvailableDNSRoutes     []AvailableDNSRoute     `json:"availableDnsRoutes,omitempty"`

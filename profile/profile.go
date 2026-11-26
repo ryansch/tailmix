@@ -48,6 +48,9 @@ type Status struct {
 	ExitNodeID      string
 	PublicKey       string
 	ListenPort      uint16
+	KeyExpiry       *time.Time // nil: never expires or unknown
+	KeyExpired      bool       // NeedsLogin because the node key expired
+	HaveNodeKey     bool       // a node key is configured; false after a logout
 }
 
 type PeerStatus struct {
@@ -98,4 +101,10 @@ type RoutePreferenceController interface {
 
 type ExitNodePreferenceController interface {
 	SetExitNodeIP(context.Context, netip.Addr) error
+}
+
+// LoginStarter starts an interactive login, so the engine reports a sign-in
+// link.
+type LoginStarter interface {
+	StartLogin(context.Context) error
 }

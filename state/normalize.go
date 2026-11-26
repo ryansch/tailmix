@@ -27,6 +27,10 @@ func Normalize(st *State) {
 			st.Profiles[i].WireGuard = &cfg
 		}
 		st.Profiles[i].Location = normalizeLocation(st.Profiles[i].Location.Clone())
+		if t := st.Profiles[i].LastKeyExpiry; t != nil {
+			expiry := *t
+			st.Profiles[i].LastKeyExpiry = &expiry
+		}
 	}
 	sort.SliceStable(st.Profiles, func(i, j int) bool {
 		return st.Profiles[i].ID < st.Profiles[j].ID

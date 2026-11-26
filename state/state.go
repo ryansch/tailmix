@@ -2,6 +2,7 @@ package state
 
 import (
 	"net/netip"
+	"time"
 
 	"github.com/maisem/tailmix/wireguardcfg"
 )
@@ -55,6 +56,10 @@ type Profile struct {
 	WireGuardSecretFile string               `json:"wireguardSecretFile,omitempty"`
 	WireGuardShieldsUp  bool                 `json:"wireguardShieldsUp,omitempty"`
 	Location            *Location            `json:"location,omitempty"`
+	// LastKeyExpiry is the node key expiry a Tailscale profile last reported,
+	// kept so a key that expired while tailmixd was not running still reads
+	// as expired.
+	LastKeyExpiry *time.Time `json:"lastKeyExpiry,omitempty"`
 }
 
 type IPRouteBinding struct {

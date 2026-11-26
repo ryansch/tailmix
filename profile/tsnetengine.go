@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/maisem/tailmix/tsnet"
 	"github.com/tailscale/wireguard-go/tun"
@@ -293,6 +294,7 @@ func (e *TSNetEngine) Status(ctx context.Context) (Status, error) {
 		return dnsRoutes[i].Source < dnsRoutes[j].Source
 	})
 	sort.Strings(searchDomains)
+	keyExpiry, keyExpired := keyExpiryState(st, time.Now())
 	return Status{
 		ProfileID:       e.cfg.ProfileID,
 		Alias:           e.cfg.Alias,
@@ -312,6 +314,9 @@ func (e *TSNetEngine) Status(ctx context.Context) (Status, error) {
 		SearchDomains:   searchDomains,
 		RouteAll:        routeAll,
 		ExitNodeID:      exitNodeID,
+		KeyExpiry:       keyExpiry,
+		KeyExpired:      keyExpired,
+		HaveNodeKey:     st.HaveNodeKey,
 	}, nil
 }
 
@@ -382,6 +387,19 @@ func (e *TSNetEngine) SetExitNodeIP(ctx context.Context, peerIP netip.Addr) erro
 	}
 	_, err = lc.EditPrefs(ctx, exitNodePrefs(peerIP))
 	return err
+}
+
+// StartLogin starts an interactive login, so the backend reports a new sign-in
+// link.
+func (e *TSNetEngine) StartLogin(ctx context.Context) error {
+	if e.server == nil {
+		return fmt.Errorf("tsnet server is not started")
+	}
+	lc, err := e.server.LocalClient()
+	if err != nil {
+		return err
+	}
+	return lc.StartLoginInteractive(ctx)
 }
 
 func exitNodePrefs(peerIP netip.Addr) *ipn.MaskedPrefs {
