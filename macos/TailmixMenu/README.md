@@ -1,4 +1,4 @@
-# tailmix Menu
+# tailmix menu bar app
 
 A macOS menu bar app for tailmix. From the menu bar you can:
 
@@ -34,8 +34,8 @@ and reads the state every few seconds and each time the menu opens.
 
 ```sh
 make macos-app                         # from the repository root
-cp -R "macos/TailmixMenu/build/tailmix Menu.app" /Applications/
-open "/Applications/tailmix Menu.app"
+cp -R "macos/TailmixMenu/build/tailmix.app" /Applications/
+open "/Applications/tailmix.app"
 ```
 
 `UNIVERSAL=1 make macos-app` builds for both Apple silicon and Intel Macs, which

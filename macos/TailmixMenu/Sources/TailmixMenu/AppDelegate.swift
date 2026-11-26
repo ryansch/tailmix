@@ -454,7 +454,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         settingsMenu.addItem(login)
         settings.submenu = settingsMenu
         menu.addItem(settings)
-        let quit = NSMenuItem(title: "Quit tailmix Menu", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        let quit = NSMenuItem(title: "Quit tailmix", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         menu.addItem(quit)
         layOutExitNodeValue()
     }
@@ -854,13 +854,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         // Asks for permission the first time; once decided, macOS remembers.
         center.requestAuthorization(options: [.alert, .sound]) { granted, error in
             if let error {
-                NSLog("tailmix Menu: notifications not authorized: %@", error.localizedDescription)
+                NSLog("tailmix: notifications not authorized: %@", error.localizedDescription)
             }
             guard granted else { return }
             for request in requests {
                 center.add(request) { error in
                     if let error {
-                        NSLog("tailmix Menu: could not post notification: %@", error.localizedDescription)
+                        NSLog("tailmix: could not post notification: %@", error.localizedDescription)
                     }
                 }
             }
