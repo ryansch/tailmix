@@ -14,6 +14,44 @@ import Testing
         #expect(status.profiles[2].lastError == "boom")
     }
 
+    @Test func testDecodesProfileWithoutLocationFromOldDaemon() throws {
+        let status = try JSONDecoder().decode(Status.self, from: Data(Fixtures.status.utf8))
+        #expect(!status.profiles[0].routesInEffect)
+        #expect(status.profiles[0].location == nil)
+        #expect(!status.profiles[0].acceptAllRoutes)
+        #expect(!status.profiles[0].acceptAllDNSRoutes)
+
+        let bare = try JSONDecoder().decode(Profile.self, from: Data(#"{"name":"x"}"#.utf8))
+        #expect(!bare.routesInEffect)
+        #expect(bare.location == nil)
+        #expect(!bare.acceptAllRoutes)
+        #expect(!bare.acceptAllDNSRoutes)
+    }
+
+    @Test func testDecodesProfileLocation() throws {
+        let status = try JSONDecoder().decode(Status.self, from: Data(Fixtures.locationStatus.utf8))
+        let home = status.profiles[0]
+        #expect(home.acceptAllRoutes)
+        #expect(home.acceptAllDNSRoutes)
+        #expect(!home.routesInEffect)
+        #expect(home.location == ProfileLocation(
+            supported: true, enabled: true, current: "home", override: "",
+            homeNetworks: ["aa:bb:cc:dd:ee:ff"], networkAvailable: true, onHomeNetwork: true))
+
+        let work = status.profiles[1]
+        #expect(!work.acceptAllRoutes)
+        #expect(work.acceptAllDNSRoutes)
+        #expect(work.routesInEffect)
+        #expect(work.location == ProfileLocation(
+            supported: true, enabled: true, current: "unknown", override: "on",
+            homeNetworks: [], networkAvailable: false, onHomeNetwork: false))
+
+        #expect(status.profiles[2].routesInEffect)
+        #expect(status.profiles[2].location == nil)
+
+        #expect(try JSONDecoder().decode(ProfileLocation.self, from: Data("{}".utf8)) == ProfileLocation())
+    }
+
     @Test func testDecodesExitNodes() throws {
         let nodes = try JSONDecoder().decode(ExitNodes.self, from: Data(Fixtures.exitNodes.utf8))
         #expect(nodes.selected?.nodeID == "nGW")

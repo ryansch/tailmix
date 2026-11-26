@@ -55,6 +55,30 @@ public struct ControlClient: Sendable {
         try request("POST", Self.profilePath(name) + (connected ? "/enable" : "/disable"))
     }
 
+    /// Records the current default gateway(s) as one of the profile's home networks.
+    @discardableResult
+    public func markCurrentNetworkHome(_ name: String) throws -> Profile {
+        try request("POST", Self.profilePath(name) + "/location/home-networks/current")
+    }
+
+    /// Removes the current default gateway(s) from the profile's home networks.
+    @discardableResult
+    public func forgetCurrentNetwork(_ name: String) throws -> Profile {
+        try request("DELETE", Self.profilePath(name) + "/location/home-networks/current")
+    }
+
+    /// Forces the profile's routes "on" or "off" regardless of its location.
+    @discardableResult
+    public func setLocationOverride(_ name: String, routes: String) throws -> Profile {
+        let body = try JSONEncoder().encode(SetLocationOverrideRequest(routes: routes))
+        return try request("PUT", Self.profilePath(name) + "/location/override", body: body)
+    }
+
+    @discardableResult
+    public func clearLocationOverride(_ name: String) throws -> Profile {
+        try request("DELETE", Self.profilePath(name) + "/location/override")
+    }
+
     @discardableResult
     public func setExitNode(profileName: String, nodeID: String) throws -> ExitNodes {
         let body = try JSONEncoder().encode(SetExitNodeRequest(profileName: profileName, peer: nodeID))

@@ -9,6 +9,124 @@ private final class ExitNodeBox: NSObject {
     init(_ ref: ExitNodeRef) { self.ref = ref }
 }
 
+/// Wraps a routes override choice for NSMenuItem.representedObject, so the
+/// action uses the direction the clicked item showed.
+private final class RoutesOverrideBox: NSObject {
+    let profile: String
+    let routes: String
+    init(profile: String, routes: String) {
+        self.profile = profile
+        self.routes = routes
+    }
+}
+
+/// Draws the menu bar icon: one rounded badge per profile.
+private enum BadgeIcon {
+    static let height: CGFloat = 16
+    static let badgeHeight: CGFloat = 12
+    static let minBadgeWidth: CGFloat = 12
+    static let spacing: CGFloat = 2
+    static let barHeight: CGFloat = 2
+    static let lineWidth: CGFloat = 1.3
+    static let cornerRadius: CGFloat = 3
+    static let font = NSFont.systemFont(ofSize: 9.5, weight: .bold)
+
+    /// A template image unless a badge shows an error; then the colours are
+    /// fixed, resolved against the menu bar's appearance.
+    static func image(_ badges: [ProfileBadge], appearance: NSAppearance, description: String) -> NSImage {
+        let hasError = badges.contains(where: \.error)
+        var normal = NSColor.black.cgColor
+        var warning = NSColor.black.cgColor
+        if hasError {
+            appearance.performAsCurrentDrawingAppearance {
+                normal = NSColor.labelColor.cgColor
+                warning = NSColor.systemOrange.cgColor
+            }
+        }
+        let widths = badges.map(badgeWidth)
+        let width = max(widths.reduce(0, +) + spacing * CGFloat(max(badges.count - 1, 0)), 1)
+        let image = NSImage(size: NSSize(width: width, height: height), flipped: false) { _ in
+            guard let context = NSGraphicsContext.current?.cgContext else { return false }
+            // The knocked-out labels clear only this layer, not what is behind the image.
+            context.beginTransparencyLayer(auxiliaryInfo: nil)
+            var x: CGFloat = 0
+            for (badge, badgeWidth) in zip(badges, widths) {
+                draw(badge, in: NSRect(x: x, y: height - badgeHeight, width: badgeWidth, height: badgeHeight),
+                     color: badge.error ? warning : normal, context: context)
+                x += badgeWidth + spacing
+            }
+            context.endTransparencyLayer()
+            return true
+        }
+        image.isTemplate = !hasError
+        image.accessibilityDescription = description
+        return image
+    }
+
+    /// For example "home connected, routes on; work off".
+    static func accessibilityDescription(_ badges: [ProfileBadge], names: [String]) -> String {
+        let parts = badges.enumerated().map { index, badge in
+            let name = index < names.count ? names[index] : badge.label
+            var state = badge.connected ? "connected, routes \(badge.routes ? "on" : "off")" : "off"
+            if badge.error { state += ", error" }
+            return "\(name) \(state)"
+        }
+        return parts.isEmpty ? "tailmix" : "tailmix: " + parts.joined(separator: "; ")
+    }
+
+    private static func label(_ text: String) -> NSAttributedString {
+        NSAttributedString(string: text, attributes: [.font: font, .foregroundColor: NSColor.black])
+    }
+
+    private static func badgeWidth(_ badge: ProfileBadge) -> CGFloat {
+        max(minBadgeWidth, ceil(label(badge.label).size().width) + 6)
+    }
+
+    /// Draws text in the context's fill colour with its ink centred in rect.
+    /// Centring the glyphs' own bounds, not the font's line box, keeps the
+    /// letters clear of the badge's top edge (the line box is taller than
+    /// ascender plus descender).
+    private static func drawLabel(_ text: String, centredIn rect: NSRect, context: CGContext) {
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font,
+            NSAttributedString.Key(kCTForegroundColorFromContextAttributeName as String): true,
+        ]
+        let line = CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: attributes))
+        context.saveGState()
+        context.textMatrix = .identity
+        context.textPosition = .zero
+        let ink = CTLineGetImageBounds(line, context)
+        context.textPosition = CGPoint(x: rect.midX - ink.midX, y: rect.midY - ink.midY)
+        CTLineDraw(line, context)
+        context.restoreGState()
+    }
+
+    private static func draw(_ badge: ProfileBadge, in rect: NSRect, color: CGColor, context: CGContext) {
+        context.setFillColor(color)
+        context.setStrokeColor(color)
+        if badge.connected {
+            context.addPath(CGPath(roundedRect: rect, cornerWidth: cornerRadius, cornerHeight: cornerRadius, transform: nil))
+            context.fillPath()
+            context.saveGState()
+            context.setBlendMode(.destinationOut)
+            drawLabel(badge.label, centredIn: rect, context: context)
+            context.restoreGState()
+        } else {
+            let inset = rect.insetBy(dx: lineWidth / 2, dy: lineWidth / 2)
+            let radius = cornerRadius - lineWidth / 2
+            context.setLineWidth(lineWidth)
+            context.addPath(CGPath(roundedRect: inset, cornerWidth: radius, cornerHeight: radius, transform: nil))
+            context.strokePath()
+            drawLabel(badge.label, centredIn: rect, context: context)
+        }
+        if badge.routes {
+            let bar = NSRect(x: rect.minX + 2, y: 0, width: rect.width - 4, height: barHeight)
+            context.addPath(CGPath(roundedRect: bar, cornerWidth: barHeight / 2, cornerHeight: barHeight / 2, transform: nil))
+            context.fillPath()
+        }
+    }
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private static let rememberedExitNodeKey = "LastExitNode"
@@ -19,6 +137,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let menu = NSMenu()
     private var timer: Timer?
     private var menuIsOpen = false
+    /// What the status item currently shows, so refreshes skip no-op updates.
+    private var shownIcon: IconState?
+    private var shownAppearance: NSAppearance.Name?
+    private var shownNames: [String] = []
     private var busy = false
     private var snapshot: Snapshot?
     private var lastError: Error?
@@ -98,7 +220,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if rememberedExitNode != ref { rememberedExitNode = ref }
         }
         let next = MenuModel.build(snapshot: snapshot, error: error, currentUID: currentUID, remembered: rememberedExitNode)
-        updateIcon(next.icon)
+        updateIcon(next)
         // Rebuilding an open menu would close the submenu being browsed.
         if next != model || menu.items.isEmpty {
             model = next
@@ -123,30 +245,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: Building the menu
 
-    private func updateIcon(_ state: IconState) {
+    /// Updates the status item only when something visible changed. The item
+    /// has no tooltip; the image's accessibility description names each
+    /// profile's state instead.
+    private func updateIcon(_ next: MenuModel) {
         guard let button = statusItem.button else { return }
-        let symbol: String
-        let description: String
-        switch state {
+        let appearance = button.effectiveAppearance.name
+        let names = next.profiles.map(\.name)
+        guard next.icon != shownIcon || appearance != shownAppearance || names != shownNames else { return }
+        shownIcon = next.icon
+        shownAppearance = appearance
+        shownNames = names
+        switch next.icon {
         case .unavailable:
-            symbol = "exclamationmark.triangle"
-            description = "tailmix is not running"
-        case .disconnected:
-            symbol = "network.slash"
-            description = "tailmix is disconnected"
-        case .connected:
-            symbol = "network"
-            description = "tailmix is connected"
-        case .exitNode:
-            symbol = "network.badge.shield.half.filled"
-            description = "tailmix is using an exit node"
+            button.image = symbolImage("exclamationmark.triangle", description: "tailmix is not running")
+            button.appearsDisabled = true
+        case .paused:
+            button.image = symbolImage("pause.circle", description: "tailmix is paused")
+            button.appearsDisabled = true
+        case .badges(let badges) where badges.isEmpty:
+            // An empty badge image would leave nothing to click.
+            button.image = symbolImage("network", description: "tailmix: no profiles")
+            button.appearsDisabled = false
+        case .badges(let badges):
+            button.image = BadgeIcon.image(
+                badges, appearance: button.effectiveAppearance,
+                description: BadgeIcon.accessibilityDescription(badges, names: names))
+            button.appearsDisabled = false
         }
+    }
+
+    private func symbolImage(_ symbol: String, description: String) -> NSImage? {
         let image = NSImage(systemSymbolName: symbol, accessibilityDescription: description)
             ?? NSImage(systemSymbolName: "network", accessibilityDescription: description)
         image?.isTemplate = true
-        button.image = image
-        button.appearsDisabled = state == .disconnected || state == .unavailable
-        button.toolTip = model.headline
+        return image
     }
 
     private func rebuildMenu() {
@@ -209,6 +342,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 login.indentationLevel = 1
                 menu.addItem(login)
             }
+            if let location = row.location {
+                addLocationItems(location, for: row)
+            }
+        }
+    }
+
+    /// Location items sit deeper and smaller than profile rows so they read
+    /// as belonging to the profile above them.
+    private static let locationIndent = 2
+
+    private func locationTitle(_ title: String, color: NSColor?) -> NSAttributedString {
+        var attributes: [NSAttributedString.Key: Any] = [.font: NSFont.menuFont(ofSize: NSFont.smallSystemFontSize)]
+        if let color { attributes[.foregroundColor] = color }
+        return NSAttributedString(string: title, attributes: attributes)
+    }
+
+    private func addLocationItems(_ location: LocationRow, for row: ProfileRow) {
+        let detail = disabledItem(location.detail, indent: Self.locationIndent)
+        detail.attributedTitle = locationTitle(location.detail, color: .secondaryLabelColor)
+        menu.addItem(detail)
+        var overrideBox: RoutesOverrideBox?
+        if let routes = location.overrideRoutes {
+            overrideBox = RoutesOverrideBox(profile: row.name, routes: routes)
+        }
+        let actions: [(String?, Selector, Any?)] = [
+            (location.markTitle, #selector(markNetworkHome(_:)), row.name),
+            (location.forgetTitle, #selector(forgetNetwork(_:)), row.name),
+            (location.overrideTitle, #selector(overrideRoutes(_:)), overrideBox),
+            (location.clearOverrideTitle, #selector(clearRoutesOverride(_:)), row.name),
+        ]
+        for case let (title?, action, represented) in actions {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            item.target = self
+            item.representedObject = represented
+            item.indentationLevel = Self.locationIndent
+            item.attributedTitle = locationTitle(title, color: nil)
+            item.isEnabled = row.isActionable && !busy
+            menu.addItem(item)
         }
     }
 
@@ -309,6 +480,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let connect = !row.isOn
         perform(connect ? "connect \(name)" : "disconnect \(name)") { client in
             try client.setProfileConnected(name, connect)
+        }
+    }
+
+    @objc private func markNetworkHome(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String else { return }
+        perform("mark this network as home for \(name)") { client in
+            _ = try client.markCurrentNetworkHome(name)
+        }
+    }
+
+    @objc private func forgetNetwork(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String else { return }
+        perform("forget this network for \(name)") { client in
+            _ = try client.forgetCurrentNetwork(name)
+        }
+    }
+
+    @objc private func overrideRoutes(_ sender: NSMenuItem) {
+        guard let box = sender.representedObject as? RoutesOverrideBox else { return }
+        let name = box.profile, routes = box.routes
+        perform(routes == "on" ? "use \(name) routes" : "skip \(name) routes") { client in
+            _ = try client.setLocationOverride(name, routes: routes)
+        }
+    }
+
+    @objc private func clearRoutesOverride(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String else { return }
+        perform("return \(name) to automatic routes") { client in
+            _ = try client.clearLocationOverride(name)
         }
     }
 

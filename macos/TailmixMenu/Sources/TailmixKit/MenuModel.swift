@@ -14,14 +14,43 @@ public struct ExitNodeRef: Codable, Equatable {
     }
 }
 
+/// One profile's mark in the menu bar icon.
+public struct ProfileBadge: Equatable {
+    public var label: String
+    /// Drawn solid when connected, outlined otherwise.
+    public var connected: Bool
+    /// The profile's routes are in effect; drawn as a bar under the label.
+    public var routes: Bool
+    /// The profile has an error; drawn amber.
+    public var error: Bool
+
+    public init(label: String, connected: Bool, routes: Bool, error: Bool) {
+        self.label = label
+        self.connected = connected
+        self.routes = routes
+        self.error = error
+    }
+}
+
 public enum IconState: Equatable {
     /// The daemon cannot be reached.
     case unavailable
-    /// No profile is connected, or tailmix is paused.
-    case disconnected
-    case connected
-    /// Default traffic goes through an exit node.
-    case exitNode
+    /// tailmix is paused.
+    case paused
+    /// One badge per profile, in the daemon's profile order.
+    case badges([ProfileBadge])
+}
+
+/// The location-aware routing lines under an opted-in profile. A nil title
+/// means that item is not shown.
+public struct LocationRow: Equatable {
+    public var detail: String
+    public var markTitle: String?
+    public var forgetTitle: String?
+    public var overrideTitle: String?
+    /// The override the override item sets: "on" or "off".
+    public var overrideRoutes: String?
+    public var clearOverrideTitle: String?
 }
 
 public struct ProfileRow: Equatable {
@@ -33,6 +62,8 @@ public struct ProfileRow: Equatable {
     public var isActionable: Bool
     public var loginURL: URL?
     public var errorMessage: String?
+    /// nil when the profile does not use location-aware routing.
+    public var location: LocationRow?
 }
 
 public struct ExitNodeChoice: Equatable {
@@ -99,14 +130,17 @@ public struct MenuModel: Equatable {
                 : "\(connected) of \(total) profiles connected"
         }
 
-        let selected = snapshot.exitNodes.selected
         let icon: IconState
-        if paused || connected == 0 {
-            icon = .disconnected
-        } else if selected?.state == "installed" {
-            icon = .exitNode
+        if paused {
+            icon = .paused
         } else {
-            icon = .connected
+            let labels = badgeLabels(snapshot.status.profiles.map(\.name))
+            icon = .badges(zip(snapshot.status.profiles, labels).map { profile, label in
+                let isConnected = profile.runtimeState == "running"
+                return ProfileBadge(
+                    label: label, connected: isConnected, routes: isConnected && profile.routesInEffect,
+                    error: !profile.lastError.isEmpty)
+            })
         }
 
         var needsOperator = false
@@ -122,6 +156,26 @@ public struct MenuModel: Equatable {
             headline: headline, icon: icon, isDaemonReachable: true, profiles: profiles,
             exitNode: exitNodeSection(snapshot, remembered: remembered, paused: paused),
             needsOperator: needsOperator, operatorName: operatorName)
+    }
+
+    /// The shortest prefix of each name that no other name shares, with its
+    /// first character uppercased. A name that is a prefix of another gets
+    /// its whole self.
+    public static func badgeLabels(_ names: [String]) -> [String] {
+        names.enumerated().map { index, name in
+            let characters = Array(name)
+            var length = min(1, characters.count)
+            while length < characters.count {
+                let prefix = String(characters[..<length])
+                let shared = names.enumerated().contains { other, otherName in
+                    other != index && otherName.hasPrefix(prefix)
+                }
+                if !shared { break }
+                length += 1
+            }
+            let prefix = String(characters[..<length])
+            return prefix.prefix(1).uppercased() + prefix.dropFirst()
+        }
     }
 
     static func unreachableHeadline(_ error: Error?) -> String {
@@ -146,7 +200,41 @@ public struct MenuModel: Equatable {
         let loginURL = profile.runtimeState == "needs-login" && !profile.authURL.isEmpty ? URL(string: profile.authURL) : nil
         return ProfileRow(
             name: profile.name, detail: detail, isOn: profile.enabled, isActionable: !paused,
-            loginURL: loginURL, errorMessage: profile.lastError.isEmpty ? nil : profile.lastError)
+            loginURL: loginURL, errorMessage: profile.lastError.isEmpty ? nil : profile.lastError,
+            location: locationRow(profile))
+    }
+
+    static func locationRow(_ profile: Profile) -> LocationRow? {
+        guard let location = profile.location else { return nil }
+        let place: String
+        switch location.current {
+        case "home": place = "At home"
+        case "away": place = "Away"
+        default: place = "Location unknown"
+        }
+        let hasOverride = !location.override.isEmpty
+        var detail = "\(place): routes \(profile.routesInEffect ? "on" : "off")"
+        if hasOverride {
+            detail += " (override)"
+        }
+
+        var overrideTitle: String?
+        var overrideRoutes: String?
+        if profile.routesInEffect {
+            overrideTitle = "Skip \(profile.name) routes now"
+            overrideRoutes = "off"
+        } else if !hasOverride && (profile.acceptAllRoutes || profile.acceptAllDNSRoutes) {
+            // Location never turns on routes the configuration has off.
+            overrideTitle = "Use \(profile.name) routes now"
+            overrideRoutes = "on"
+        }
+
+        return LocationRow(
+            detail: detail,
+            markTitle: location.networkAvailable && !location.onHomeNetwork ? "This network is home" : nil,
+            forgetTitle: location.onHomeNetwork ? "Forget this network" : nil,
+            overrideTitle: overrideTitle, overrideRoutes: overrideRoutes,
+            clearOverrideTitle: hasOverride ? "Return to automatic" : nil)
     }
 
     static func exitNodeSection(_ snapshot: Snapshot, remembered: ExitNodeRef?, paused: Bool) -> ExitNodeSection? {

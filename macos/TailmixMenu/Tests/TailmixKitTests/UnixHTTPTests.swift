@@ -70,6 +70,38 @@ import Testing
         #expect((error as? APIError)?.isPermissionDenied == true)
     }
 
+    @Test func testSendsLocationMutations() throws {
+        let profile = #"{"name":"my work","enabled":true,"routesInEffect":true}"#
+        let server = try FakeDaemon { request in
+            switch (request.method, request.path) {
+            case ("POST", "/v1/profiles/by-name/my%20work/location/home-networks/current"),
+                 ("DELETE", "/v1/profiles/by-name/my%20work/location/home-networks/current"),
+                 ("PUT", "/v1/profiles/by-name/my%20work/location/override"),
+                 ("DELETE", "/v1/profiles/by-name/my%20work/location/override"):
+                return (200, profile)
+            default: return (404, "404 page not found\n")
+            }
+        }
+        defer { server.stop() }
+        let client = ControlClient(socketDirectory: server.directory, timeout: 5)
+
+        #expect(try client.markCurrentNetworkHome("my work").routesInEffect)
+        #expect(try client.forgetCurrentNetwork("my work").routesInEffect)
+        #expect(try client.setLocationOverride("my work", routes: "off").routesInEffect)
+        #expect(try client.clearLocationOverride("my work").routesInEffect)
+
+        #expect(server.requests.map { "\($0.method) \($0.path)" } == [
+            "POST /v1/profiles/by-name/my%20work/location/home-networks/current",
+            "DELETE /v1/profiles/by-name/my%20work/location/home-networks/current",
+            "PUT /v1/profiles/by-name/my%20work/location/override",
+            "DELETE /v1/profiles/by-name/my%20work/location/override",
+        ])
+        let put = server.requests[2]
+        #expect(put.contentType == "application/json")
+        let body = try JSONSerialization.jsonObject(with: put.body) as? [String: String]
+        #expect(body == ["routes": "off"])
+    }
+
     @Test func testOldDaemonWithoutOperator() throws {
         let server = try FakeDaemon { request in
             switch request.path {

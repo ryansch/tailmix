@@ -36,10 +36,19 @@ public struct Profile: Equatable, Decodable {
     public var peerCount: Int
     public var authURL: String
     public var lastError: String
+    /// The configured accept-all values; location never turns them on.
+    public var acceptAllRoutes: Bool
+    public var acceptAllDNSRoutes: Bool
+    /// Whether the profile imports routes right now (IP or DNS accept-all).
+    public var routesInEffect: Bool
+    /// nil when location-aware routing is off or the daemon predates it.
+    public var location: ProfileLocation?
 
     public init(id: String = "", name: String, kind: String = "tailscale", enabled: Bool,
                 runtimeState: String, backendState: String = "", selfDNSName: String = "",
-                peerCount: Int = 0, authURL: String = "", lastError: String = "") {
+                peerCount: Int = 0, authURL: String = "", lastError: String = "",
+                acceptAllRoutes: Bool = false, acceptAllDNSRoutes: Bool = false,
+                routesInEffect: Bool = false, location: ProfileLocation? = nil) {
         self.id = id
         self.name = name
         self.kind = kind
@@ -50,6 +59,10 @@ public struct Profile: Equatable, Decodable {
         self.peerCount = peerCount
         self.authURL = authURL
         self.lastError = lastError
+        self.acceptAllRoutes = acceptAllRoutes
+        self.acceptAllDNSRoutes = acceptAllDNSRoutes
+        self.routesInEffect = routesInEffect
+        self.location = location
     }
 
     public init(from decoder: Decoder) throws {
@@ -64,12 +77,59 @@ public struct Profile: Equatable, Decodable {
         peerCount = try c.decodeIfPresent(Int.self, forKey: .peerCount) ?? 0
         authURL = try c.decodeIfPresent(String.self, forKey: .authURL) ?? ""
         lastError = try c.decodeIfPresent(String.self, forKey: .lastError) ?? ""
+        acceptAllRoutes = try c.decodeIfPresent(Bool.self, forKey: .acceptAllRoutes) ?? false
+        acceptAllDNSRoutes = try c.decodeIfPresent(Bool.self, forKey: .acceptAllDNSRoutes) ?? false
+        routesInEffect = try c.decodeIfPresent(Bool.self, forKey: .routesInEffect) ?? false
+        location = try c.decodeIfPresent(ProfileLocation.self, forKey: .location)
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, name, kind, enabled, runtimeState, backendState, peerCount, lastError
+        case acceptAllRoutes, routesInEffect, location
         case selfDNSName = "selfDnsName"
         case authURL = "authUrl"
+        case acceptAllDNSRoutes = "acceptAllDnsRoutes"
+    }
+}
+
+/// A profile's location-aware routing state.
+public struct ProfileLocation: Equatable, Decodable {
+    public var supported: Bool
+    public var enabled: Bool
+    /// "home", "away" or "unknown".
+    public var current: String
+    /// "on", "off", or "" when no override is set.
+    public var override: String
+    public var homeNetworks: [String]
+    /// Whether a default gateway is seen now.
+    public var networkAvailable: Bool
+    /// Whether a seen gateway is one of the home networks.
+    public var onHomeNetwork: Bool
+
+    public init(supported: Bool = false, enabled: Bool = false, current: String = "", override: String = "",
+                homeNetworks: [String] = [], networkAvailable: Bool = false, onHomeNetwork: Bool = false) {
+        self.supported = supported
+        self.enabled = enabled
+        self.current = current
+        self.override = override
+        self.homeNetworks = homeNetworks
+        self.networkAvailable = networkAvailable
+        self.onHomeNetwork = onHomeNetwork
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        supported = try c.decodeIfPresent(Bool.self, forKey: .supported) ?? false
+        enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
+        current = try c.decodeIfPresent(String.self, forKey: .current) ?? ""
+        override = try c.decodeIfPresent(String.self, forKey: .override) ?? ""
+        homeNetworks = try c.decodeIfPresent([String].self, forKey: .homeNetworks) ?? []
+        networkAvailable = try c.decodeIfPresent(Bool.self, forKey: .networkAvailable) ?? false
+        onHomeNetwork = try c.decodeIfPresent(Bool.self, forKey: .onHomeNetwork) ?? false
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case supported, enabled, current, override, homeNetworks, networkAvailable, onHomeNetwork
     }
 }
 
@@ -238,4 +298,8 @@ public struct Operator: Equatable, Decodable {
 struct SetExitNodeRequest: Encodable {
     var profileName: String
     var peer: String
+}
+
+struct SetLocationOverrideRequest: Encodable {
+    var routes: String
 }

@@ -26,7 +26,11 @@ import Testing
         let lab = Profile(id: "p3", name: "lab", enabled: true, runtimeState: "needs-login", authURL: "https://login.example/a", lastError: "boom")
         let model = MenuModel.build(snapshot: snapshot(profiles: [home, work, lab]), error: nil, currentUID: "501", remembered: nil)
         #expect(model.headline == "1 of 3 profiles connected")
-        #expect(model.icon == .connected)
+        #expect(model.icon == .badges([
+            ProfileBadge(label: "H", connected: true, routes: false, error: false),
+            ProfileBadge(label: "W", connected: false, routes: false, error: false),
+            ProfileBadge(label: "L", connected: false, routes: false, error: true),
+        ]))
         #expect(model.profiles.map(\.detail) == ["Connected · 3 peers", "Disconnected", "Needs login"])
         #expect(model.profiles.map(\.isOn) == [true, false, true])
         #expect(model.profiles[2].loginURL == URL(string: "https://login.example/a"))
@@ -40,7 +44,7 @@ import Testing
         let paused = Profile(id: "p1", name: "home", enabled: true, runtimeState: "down")
         let model = MenuModel.build(snapshot: snapshot(state: "down", profiles: [paused]), error: nil, currentUID: "501", remembered: nil)
         #expect(model.headline == "tailmix is paused")
-        #expect(model.icon == .disconnected)
+        #expect(model.icon == .paused)
         #expect(model.profiles[0].detail == "Paused")
         #expect(!model.profiles[0].isActionable)
     }
@@ -73,7 +77,10 @@ import Testing
                 AvailableExitNode(profileID: "p2", profileName: "work", nodeID: "n3", dnsName: "relay.work.ts.net."),
             ])
         let model = MenuModel.build(snapshot: snapshot(profiles: [home, workOn], exitNodes: nodes), error: nil, currentUID: "501", remembered: nil)
-        #expect(model.icon == .exitNode)
+        #expect(model.icon == .badges([
+            ProfileBadge(label: "H", connected: true, routes: false, error: false),
+            ProfileBadge(label: "W", connected: true, routes: false, error: false),
+        ]))
         let section = try #require(model.exitNode)
         #expect(section.isOn)
         #expect(section.isToggleEnabled)
@@ -95,7 +102,10 @@ import Testing
     @Test func testSelectedExitNodeWaiting() {
         let nodes = ExitNodes(selected: SelectedExitNode(profileID: "p2", profileName: "work", nodeID: "n3", dnsName: "", state: "waiting", reason: "profile_unavailable"))
         let model = MenuModel.build(snapshot: snapshot(profiles: [home, work], exitNodes: nodes), error: nil, currentUID: "501", remembered: nil)
-        #expect(model.icon == .connected)
+        #expect(model.icon == .badges([
+            ProfileBadge(label: "H", connected: true, routes: false, error: false),
+            ProfileBadge(label: "W", connected: false, routes: false, error: false),
+        ]))
         #expect(model.exitNode?.toggleTitle == "Exit Node: n3 (work)")
         #expect(model.exitNode?.note == "Waiting for work to connect")
         #expect(model.exitNode?.isOn == true)
@@ -120,6 +130,139 @@ import Testing
         let model = MenuModel.build(snapshot: snapshot(profiles: [home], exitNodes: available), error: nil, currentUID: "501", remembered: nil)
         #expect(model.exitNode?.toggleTitle == "Exit Node: None")
         #expect(model.exitNode?.isToggleEnabled == false)
+    }
+
+    @Test func testBadgeLabels() {
+        #expect(MenuModel.badgeLabels(["home", "work"]) == ["H", "W"])
+        #expect(MenuModel.badgeLabels(["home", "hq"]) == ["Ho", "Hq"])
+        #expect(MenuModel.badgeLabels(["home", "homelab"]) == ["Home", "Homel"])
+        #expect(MenuModel.badgeLabels(["a"]) == ["A"])
+        #expect(MenuModel.badgeLabels([]) == [])
+        #expect(MenuModel.badgeLabels([""]) == [""])
+    }
+
+    private func badges(_ profiles: [Profile]) -> IconState {
+        MenuModel.build(snapshot: snapshot(profiles: profiles), error: nil, currentUID: "501", remembered: nil).icon
+    }
+
+    @Test func testBadgesAtHomeWithWorkOff() {
+        let atHome = Profile(name: "home", enabled: true, runtimeState: "running", routesInEffect: false)
+        #expect(badges([atHome, work]) == .badges([
+            ProfileBadge(label: "H", connected: true, routes: false, error: false),
+            ProfileBadge(label: "W", connected: false, routes: false, error: false),
+        ]))
+    }
+
+    @Test func testBadgesBothOnWithRoutes() {
+        let homeOn = Profile(name: "home", enabled: true, runtimeState: "running", routesInEffect: true)
+        let workOn = Profile(name: "work", enabled: true, runtimeState: "running", routesInEffect: true)
+        #expect(badges([homeOn, workOn]) == .badges([
+            ProfileBadge(label: "H", connected: true, routes: true, error: false),
+            ProfileBadge(label: "W", connected: true, routes: true, error: false),
+        ]))
+    }
+
+    @Test func testBadgesAwayWithHomeRoutesOn() {
+        let away = Profile(name: "home", enabled: true, runtimeState: "running", routesInEffect: true)
+        let workOn = Profile(name: "work", enabled: true, runtimeState: "running", routesInEffect: false)
+        #expect(badges([away, workOn]) == .badges([
+            ProfileBadge(label: "H", connected: true, routes: true, error: false),
+            ProfileBadge(label: "W", connected: true, routes: false, error: false),
+        ]))
+    }
+
+    @Test func testBadgesHomeError() {
+        let broken = Profile(name: "home", enabled: true, runtimeState: "error", lastError: "boom", routesInEffect: true)
+        #expect(badges([broken, work]) == .badges([
+            ProfileBadge(label: "H", connected: false, routes: false, error: true),
+            ProfileBadge(label: "W", connected: false, routes: false, error: false),
+        ]))
+    }
+
+    private func locationRow(
+        current: String = "home", override: String = "", routesInEffect: Bool = false,
+        acceptAllRoutes: Bool = true, acceptAllDNSRoutes: Bool = true,
+        networkAvailable: Bool = true, onHomeNetwork: Bool = false, state: String = "up"
+    ) throws -> ProfileRow {
+        let profile = Profile(
+            name: "home", enabled: true, runtimeState: state == "down" ? "down" : "running",
+            acceptAllRoutes: acceptAllRoutes, acceptAllDNSRoutes: acceptAllDNSRoutes, routesInEffect: routesInEffect,
+            location: ProfileLocation(
+                supported: true, enabled: true, current: current, override: override,
+                networkAvailable: networkAvailable, onHomeNetwork: onHomeNetwork))
+        let model = MenuModel.build(snapshot: snapshot(state: state, profiles: [profile]), error: nil, currentUID: "501", remembered: nil)
+        return try #require(model.profiles.first)
+    }
+
+    @Test func testNoLocationRowWithoutLocation() {
+        let model = MenuModel.build(snapshot: snapshot(profiles: [home]), error: nil, currentUID: "501", remembered: nil)
+        #expect(model.profiles[0].location == nil)
+    }
+
+    @Test func testLocationDetail() throws {
+        #expect(try locationRow(current: "home", routesInEffect: false).location?.detail == "At home: routes off")
+        #expect(try locationRow(current: "away", routesInEffect: true).location?.detail == "Away: routes on")
+        #expect(try locationRow(current: "unknown", routesInEffect: true).location?.detail == "Location unknown: routes on")
+        #expect(try locationRow(current: "away", override: "off", routesInEffect: false).location?.detail == "Away: routes off (override)")
+        #expect(try locationRow(current: "home", override: "on", routesInEffect: true).location?.detail == "At home: routes on (override)")
+        // Configured accept-all off everywhere: the word still follows routesInEffect.
+        #expect(try locationRow(current: "away", routesInEffect: false, acceptAllRoutes: false, acceptAllDNSRoutes: false)
+            .location?.detail == "Away: routes off")
+    }
+
+    @Test func testMarkAndForgetTitles() throws {
+        let away = try #require(try locationRow(networkAvailable: true, onHomeNetwork: false).location)
+        #expect(away.markTitle == "This network is home")
+        #expect(away.forgetTitle == nil)
+
+        let onHome = try #require(try locationRow(networkAvailable: true, onHomeNetwork: true).location)
+        #expect(onHome.markTitle == nil)
+        #expect(onHome.forgetTitle == "Forget this network")
+
+        let offline = try #require(try locationRow(networkAvailable: false, onHomeNetwork: false).location)
+        #expect(offline.markTitle == nil)
+        #expect(offline.forgetTitle == nil)
+    }
+
+    @Test func testOverrideTitles() throws {
+        let off = try #require(try locationRow(current: "home", routesInEffect: false).location)
+        #expect(off.overrideTitle == "Use home routes now")
+        #expect(off.overrideRoutes == "on")
+        #expect(off.clearOverrideTitle == nil)
+
+        let on = try #require(try locationRow(current: "away", routesInEffect: true).location)
+        #expect(on.overrideTitle == "Skip home routes now")
+        #expect(on.overrideRoutes == "off")
+        #expect(on.clearOverrideTitle == nil)
+
+        // Only one configured accept-all on is enough to offer "Use".
+        let dnsOnly = try #require(try locationRow(routesInEffect: false, acceptAllRoutes: false, acceptAllDNSRoutes: true).location)
+        #expect(dnsOnly.overrideTitle == "Use home routes now")
+    }
+
+    @Test func testUseRoutesHiddenWhenConfiguredOff() throws {
+        let row = try #require(try locationRow(routesInEffect: false, acceptAllRoutes: false, acceptAllDNSRoutes: false).location)
+        #expect(row.overrideTitle == nil)
+        #expect(row.overrideRoutes == nil)
+    }
+
+    @Test func testOverrideSet() throws {
+        let forcedOff = try #require(try locationRow(current: "away", override: "off", routesInEffect: false).location)
+        #expect(forcedOff.overrideTitle == nil)
+        #expect(forcedOff.overrideRoutes == nil)
+        #expect(forcedOff.clearOverrideTitle == "Return to automatic")
+
+        // Routes on under an override still offer "Skip".
+        let forcedOn = try #require(try locationRow(current: "home", override: "on", routesInEffect: true).location)
+        #expect(forcedOn.overrideTitle == "Skip home routes now")
+        #expect(forcedOn.overrideRoutes == "off")
+        #expect(forcedOn.clearOverrideTitle == "Return to automatic")
+    }
+
+    @Test func testLocationRowNotActionableWhilePaused() throws {
+        let row = try locationRow(state: "down")
+        #expect(row.location != nil)
+        #expect(!row.isActionable)
     }
 
     @Test func testShortName() {
