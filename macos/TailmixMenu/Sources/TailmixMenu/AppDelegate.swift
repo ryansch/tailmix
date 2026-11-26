@@ -102,6 +102,23 @@ private enum BadgeIcon {
         NSAttributedString(string: text, attributes: [.font: font, .foregroundColor: NSColor.black])
     }
 
+    /// One solid badge in the given colour, for use inside the menu.
+    static func menuBadge(_ label: String, color: NSColor) -> NSImage {
+        let badge = ProfileBadge(label: label, connected: true, routes: false, error: false)
+        let size = NSSize(width: badgeWidth(badge), height: badgeHeight)
+        let image = NSImage(size: size, flipped: false) { rect in
+            guard let context = NSGraphicsContext.current?.cgContext else { return false }
+            // Resolved here, so it follows the menu's appearance.
+            let cgColor = color.cgColor
+            context.beginTransparencyLayer(auxiliaryInfo: nil)
+            draw(badge, in: rect, color: cgColor, context: context)
+            context.endTransparencyLayer()
+            return true
+        }
+        image.accessibilityDescription = label
+        return image
+    }
+
     private static func badgeWidth(_ badge: ProfileBadge) -> CGFloat {
         max(minBadgeWidth, ceil(label(badge.label).size().width) + 6)
     }
@@ -186,16 +203,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     private static let sentNotificationsKey = "signInNotificationsSent"
     private static let socketDirectoryKey = "SocketDirectory"
     private static let backgroundRefreshInterval: TimeInterval = 10
+    private static let openMenuRefreshInterval: TimeInterval = 1
 
     private var statusItem: NSStatusItem!
     private let menu = NSMenu()
     private var timer: Timer?
     private var menuIsOpen = false
+    /// Submenus of the open menu that are showing; rebuilding would close them.
+    private var openSubmenus = 0
+    /// A change arrived while a submenu was showing.
+    private var rebuildPending = false
+    /// Refreshes while the menu is open, in the run loop's common modes so
+    /// it keeps firing during menu tracking.
+    private var openMenuTimer: Timer?
     /// What the status item currently shows, so refreshes skip no-op updates.
     private var shownIcon: IconState?
     private var shownAppearance: NSAppearance.Name?
     private var shownNames: [String] = []
     private var busy = false
+    /// The state a profile switch is moving to while its action runs, so the
+    /// switch keeps the clicked position instead of snapping back.
+    private var pendingToggle: (name: String, isOn: Bool)?
+    /// The Exit Node row, whose trailing value is laid out once the whole
+    /// menu exists.
+    private var exitNodeRow: (item: NSMenuItem, value: String, badge: String?, color: NSColor)?
     private var snapshot: Snapshot?
     private var lastError: Error?
     private var model = MenuModel.build(snapshot: nil, error: nil, currentUID: "", remembered: nil)
@@ -225,6 +256,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         menu.delegate = self
         menu.autoenablesItems = false
+        // No item in the main menu shows a checkmark; drop the column so
+        // titles start at the edge. MenuMetrics.leadingInset assumes this.
+        menu.showsStateColumn = false
         statusItem.menu = menu
         refreshNow()
         timer = Timer.scheduledTimer(withTimeInterval: Self.backgroundRefreshInterval, repeats: true) { [weak self] _ in
@@ -284,25 +318,62 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         }
         let next = MenuModel.build(snapshot: snapshot, error: error, currentUID: currentUID, remembered: rememberedExitNode)
         updateIcon(next)
-        // Rebuilding an open menu would close the submenu being browsed.
         if next != model || menu.items.isEmpty {
             model = next
-            if !menuIsOpen { rebuildMenu() }
+            // Rebuilding would close the submenu being browsed; wait for it.
+            if openSubmenus == 0 {
+                rebuildMenu()
+            } else {
+                rebuildPending = true
+            }
         }
     }
 
     // MARK: NSMenuDelegate
 
     func menuNeedsUpdate(_ menu: NSMenu) {
-        guard !busy else { return }
+        guard menu === self.menu, !busy else { return }
         refreshNow()
         rebuildMenu()
     }
 
-    func menuWillOpen(_ menu: NSMenu) { menuIsOpen = true }
+    func menuWillOpen(_ menu: NSMenu) {
+        guard menu === self.menu else {
+            openSubmenus += 1
+            return
+        }
+        menuIsOpen = true
+        openSubmenus = 0
+        rebuildPending = false
+        let timer = Timer(timeInterval: Self.openMenuRefreshInterval, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refreshInBackground() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        openMenuTimer = timer
+    }
+
+    /// Profile rows draw their own highlight; redraw them as it moves.
+    func menu(_ menu: NSMenu, willHighlight item: NSMenuItem?) {
+        for case let view as ProfileSwitchView in menu.items.compactMap(\.view) {
+            view.needsDisplay = true
+        }
+    }
 
     func menuDidClose(_ menu: NSMenu) {
+        guard menu === self.menu else {
+            openSubmenus = max(openSubmenus - 1, 0)
+            if openSubmenus == 0 && rebuildPending {
+                rebuildPending = false
+                // Not from inside the submenu's own close callout.
+                DispatchQueue.main.async { if self.openSubmenus == 0 { self.rebuildMenu() } }
+            }
+            return
+        }
+        openMenuTimer?.invalidate()
+        openMenuTimer = nil
         menuIsOpen = false
+        openSubmenus = 0
+        rebuildPending = false
         rebuildMenu()
     }
 
@@ -347,12 +418,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
 
     private func rebuildMenu() {
         menu.removeAllItems()
-        let headline = NSMenuItem(title: model.headline, action: nil, keyEquivalent: "")
-        headline.isEnabled = false
-        menu.addItem(headline)
-        if busy {
-            menu.addItem(disabledItem("Working…"))
-        }
+        exitNodeRow = nil
+        let header = NSMenuItem()
+        header.view = MenuHeaderView(title: model.header.title, status: busy ? "Working…" : model.header.status)
+        header.isEnabled = false
+        menu.addItem(header)
 
         if !model.isDaemonReachable {
             if let lastError, !(lastError is TransportError) {
@@ -374,106 +444,152 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         }
 
         menu.addItem(.separator())
+        let settings = NSMenuItem(title: "Settings", action: nil, keyEquivalent: "")
+        let settingsMenu = NSMenu()
+        settingsMenu.delegate = self
+        settingsMenu.autoenablesItems = false
         let login = NSMenuItem(title: "Open at Login", action: #selector(toggleOpenAtLogin), keyEquivalent: "")
         login.target = self
         login.state = SMAppService.mainApp.status == .enabled ? .on : .off
-        menu.addItem(login)
+        settingsMenu.addItem(login)
+        settings.submenu = settingsMenu
+        menu.addItem(settings)
         let quit = NSMenuItem(title: "Quit tailmix Menu", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         menu.addItem(quit)
+        layOutExitNodeValue()
     }
 
     private func addProfiles() {
         menu.addItem(.separator())
-        menu.addItem(sectionHeader("Profiles"))
         if model.profiles.isEmpty {
             menu.addItem(disabledItem("Add one with: sudo tailmix profiles add <name>", indent: 1))
             return
         }
         for row in model.profiles {
-            let item = NSMenuItem(title: row.name, action: #selector(toggleProfile(_:)), keyEquivalent: "")
+            let name = row.name
+            let isEnabled = row.isActionable && !busy
+            let isOn = pendingToggle.flatMap { $0.name == name ? $0.isOn : nil } ?? row.isOn
+            // The action lets Return toggle the highlighted row; clicks go
+            // to the view.
+            let item = NSMenuItem(title: name, action: #selector(toggleProfileItem(_:)), keyEquivalent: "")
             item.target = self
-            item.representedObject = row.name
-            item.attributedTitle = titleWithDetail(row.name, row.detail)
-            item.state = row.isOn ? .on : .off
-            item.isEnabled = row.isActionable && !busy
-            item.toolTip = row.errorMessage ?? (row.isOn ? "Click to disconnect \(row.name)" : "Click to connect \(row.name)")
+            item.representedObject = name
+            item.isEnabled = isEnabled
+            item.view = ProfileSwitchView(
+                name: name, isOn: isOn, isEnabled: isEnabled, toolTip: row.errorMessage,
+                onToggle: { [weak self] in self?.toggleProfile(named: name) })
             menu.addItem(item)
-            if let url = row.loginURL {
-                let login = NSMenuItem(title: "Log in to \(row.name)…", action: #selector(openURL(_:)), keyEquivalent: "")
-                login.target = self
-                login.representedObject = url
-                login.indentationLevel = 1
-                menu.addItem(login)
-            } else if row.waitingForLogin {
-                let title = "Waiting for sign-in link…"
-                let waiting = disabledItem(title, indent: Self.locationIndent)
-                waiting.attributedTitle = locationTitle(title, color: nil)
-                menu.addItem(waiting)
-            }
-            if let location = row.location {
-                addLocationItems(location, for: row)
+            if let status = row.status {
+                menu.addItem(profileStatusItem(status, for: row))
             }
         }
     }
 
-    /// Location items sit deeper and smaller than profile rows so they read
-    /// as belonging to the profile above them.
-    private static let locationIndent = 2
-
-    private func locationTitle(_ title: String, color: NSColor?) -> NSAttributedString {
-        var attributes: [NSAttributedString.Key: Any] = [.font: NSFont.menuFont(ofSize: NSFont.smallSystemFontSize)]
-        if let color { attributes[.foregroundColor] = color }
-        return NSAttributedString(string: title, attributes: attributes)
+    /// A profile's second row: opens the login link, opens a submenu, or is
+    /// plain text.
+    private func profileStatusItem(_ status: ProfileStatus, for row: ProfileRow) -> NSMenuItem {
+        let item = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        // Flush with the profile name above, like a two-line row.
+        item.attributedTitle = statusTitle(status.segments)
+        if let url = status.opensURL {
+            item.action = #selector(openURL(_:))
+            item.target = self
+            item.representedObject = url
+        } else if status.hasSubmenu {
+            let submenu = NSMenu()
+            submenu.delegate = self
+            submenu.autoenablesItems = false
+            if let message = row.errorMessage {
+                let error = disabledItem(Self.truncated(message))
+                error.toolTip = message
+                submenu.addItem(error)
+            }
+            let actions = row.location.map { locationActionItems($0, for: row) } ?? []
+            if row.errorMessage != nil && !actions.isEmpty {
+                submenu.addItem(.separator())
+            }
+            actions.forEach(submenu.addItem)
+            item.submenu = submenu
+        } else {
+            item.view = MenuTextView(statusTitle(status.segments))
+        }
+        return item
     }
 
-    private func addLocationItems(_ location: LocationRow, for row: ProfileRow) {
-        let detail = disabledItem(location.detail, indent: Self.locationIndent)
-        detail.attributedTitle = locationTitle(location.detail, color: .secondaryLabelColor)
-        menu.addItem(detail)
+    private func statusTitle(_ segments: [StatusSegment]) -> NSAttributedString {
+        let font = NSFont.menuFont(ofSize: NSFont.smallSystemFontSize)
+        let result = NSMutableAttributedString()
+        for (index, segment) in segments.enumerated() {
+            let color: NSColor = segment.style == .warning ? .systemOrange : .secondaryLabelColor
+            if index > 0 {
+                result.append(NSAttributedString(string: " · ", attributes: [.font: font, .foregroundColor: NSColor.secondaryLabelColor]))
+            }
+            result.append(NSAttributedString(string: segment.text, attributes: [.font: font, .foregroundColor: color]))
+        }
+        return result
+    }
+
+    /// Error messages can be long; the submenu shows the start and the
+    /// tooltip the whole message.
+    private static func truncated(_ message: String, limit: Int = 80) -> String {
+        let line = message.split(whereSeparator: \.isNewline).joined(separator: " ")
+        return line.count <= limit ? line : String(line.prefix(limit - 1)) + "…"
+    }
+
+    /// The routing actions that apply now, in the order: use/skip routes,
+    /// mark/forget the network, return to automatic.
+    private func locationActionItems(_ location: LocationRow, for row: ProfileRow) -> [NSMenuItem] {
         var overrideBox: RoutesOverrideBox?
         if let routes = location.overrideRoutes {
             overrideBox = RoutesOverrideBox(profile: row.name, routes: routes)
         }
         let actions: [(String?, Selector, Any?)] = [
+            (location.overrideTitle, #selector(overrideRoutes(_:)), overrideBox),
             (location.markTitle, #selector(markNetworkHome(_:)), row.name),
             (location.forgetTitle, #selector(forgetNetwork(_:)), row.name),
-            (location.overrideTitle, #selector(overrideRoutes(_:)), overrideBox),
             (location.clearOverrideTitle, #selector(clearRoutesOverride(_:)), row.name),
         ]
-        for case let (title?, action, represented) in actions {
+        return actions.compactMap { title, action, represented in
+            guard let title else { return nil }
             let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
             item.target = self
             item.representedObject = represented
-            item.indentationLevel = Self.locationIndent
-            item.attributedTitle = locationTitle(title, color: nil)
             item.isEnabled = row.isActionable && !busy
-            menu.addItem(item)
+            return item
         }
     }
 
     private func addExitNodes() {
         guard let section = model.exitNode else { return }
         menu.addItem(.separator())
-        menu.addItem(sectionHeader("Exit Node"))
 
-        let toggle = NSMenuItem(title: section.toggleTitle, action: #selector(toggleExitNode), keyEquivalent: "")
-        toggle.target = self
-        toggle.state = section.isOn ? .on : .off
-        toggle.isEnabled = section.isToggleEnabled && !busy
-        toggle.toolTip = section.isOn ? "Click to stop using the exit node" : "Click to use this exit node again"
-        menu.addItem(toggle)
-        if let note = section.note {
-            menu.addItem(disabledItem(note, indent: 1))
-        }
-
-        let chooser = NSMenuItem(title: "Choose Exit Node", action: nil, keyEquivalent: "")
+        let row = NSMenuItem(title: "Exit Node", action: nil, keyEquivalent: "")
+        exitNodeRow = (row, section.value, section.badge, section.isWarning ? .systemOrange : .secondaryLabelColor)
         let submenu = NSMenu()
+        submenu.delegate = self
         submenu.autoenablesItems = false
+        if let note = section.note {
+            let item = NSMenuItem(title: note, action: nil, keyEquivalent: "")
+            // This submenu has checkmarks, so its titles sit past the state column.
+            item.view = MenuTextView(
+                NSAttributedString(string: note, attributes: [
+                    .font: NSFont.menuFont(ofSize: 0), .foregroundColor: NSColor.systemOrange,
+                ]),
+                leadingInset: MenuMetrics.leadingInsetWithStateColumn)
+            submenu.addItem(item)
+        }
         let none = NSMenuItem(title: "None", action: #selector(clearExitNode), keyEquivalent: "")
         none.target = self
         none.state = section.isOn ? .off : .on
         none.isEnabled = !busy
         submenu.addItem(none)
+        if let lastUsed = section.lastUsed {
+            let item = NSMenuItem(title: lastUsed.title, action: #selector(useLastExitNode), keyEquivalent: "")
+            item.target = self
+            item.isEnabled = lastUsed.isActionable && !busy
+            item.toolTip = lastUsed.isActionable ? nil : "Not available right now"
+            submenu.addItem(item)
+        }
         if section.groups.isEmpty {
             submenu.addItem(.separator())
             submenu.addItem(disabledItem("No connected profile offers an exit node"))
@@ -488,6 +604,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
                 let countryItem = NSMenuItem(title: country.name, action: nil, keyEquivalent: "")
                 countryItem.state = country.containsSelection ? .mixed : .off
                 let cities = NSMenu()
+                cities.delegate = self
                 cities.autoenablesItems = false
                 for node in country.nodes {
                     cities.addItem(exitNodeItem(node))
@@ -496,9 +613,62 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
                 submenu.addItem(countryItem)
             }
         }
-        chooser.submenu = submenu
-        chooser.isEnabled = !busy
-        menu.addItem(chooser)
+        row.submenu = submenu
+        row.isEnabled = !busy
+        menu.addItem(row)
+    }
+
+    /// Gives the Exit Node row its grey (or amber) value, pushed right by a
+    /// right tab stop as far as the menu's width allows. Runs once every
+    /// item exists. The row's own chrome (state column, submenu arrow,
+    /// key-equivalent column) is measured from the menu rather than
+    /// guessed: past the menu's natural width, its width grows one point
+    /// per point of tab location.
+    private func layOutExitNodeValue() {
+        guard let (item, value, badge, color) = exitNodeRow else { return }
+        let title = "Exit Node"
+        let font = NSFont.menuFont(ofSize: 0)
+        let badgeImage = badge.map { BadgeIcon.menuBadge($0, color: color) }
+        func width(_ text: String) -> CGFloat {
+            ceil(NSAttributedString(string: text, attributes: [.font: font]).size().width)
+        }
+        let badgeWidth = badgeImage.map { $0.size.width + width(" ") } ?? 0
+        let minimum = width(title) + 24 + badgeWidth + width(value)
+        func titled(_ tabLocation: CGFloat) -> NSAttributedString {
+            trailingValueTitle(title, value: value, badge: badgeImage, valueColor: color, tabLocation: tabLocation)
+        }
+        let probe: CGFloat = 10_000
+        item.attributedTitle = titled(probe)
+        let chrome = menu.size.width - probe
+        item.attributedTitle = titled(minimum)
+        let natural = menu.size.width
+        item.attributedTitle = titled(max(minimum, natural - chrome))
+    }
+
+    /// "Exit Node", then at a right tab the selected node's profile badge
+    /// and the value.
+    private func trailingValueTitle(_ title: String, value: String, badge: NSImage?, valueColor: NSColor,
+                                    tabLocation: CGFloat) -> NSAttributedString {
+        let font = NSFont.menuFont(ofSize: 0)
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.tabStops = [NSTextTab(textAlignment: .right, location: tabLocation)]
+        let attributes: [NSAttributedString.Key: Any] = [.font: font, .paragraphStyle: paragraph]
+        let result = NSMutableAttributedString(string: title + "\t", attributes: attributes)
+        if let badge {
+            let attachment = NSTextAttachment()
+            attachment.image = badge
+            // Centre the badge on the capital letters of the value.
+            attachment.bounds = NSRect(x: 0, y: round((font.capHeight - badge.size.height) / 2),
+                                       width: badge.size.width, height: badge.size.height)
+            let badgeString = NSMutableAttributedString(attachment: attachment)
+            badgeString.addAttributes(attributes, range: NSRange(location: 0, length: badgeString.length))
+            result.append(badgeString)
+            result.append(NSAttributedString(string: " ", attributes: attributes))
+        }
+        var valueAttributes = attributes
+        valueAttributes[.foregroundColor] = valueColor
+        result.append(NSAttributedString(string: value, attributes: valueAttributes))
+        return result
     }
 
     private func exitNodeItem(_ node: ExitNodeChoice) -> NSMenuItem {
@@ -531,21 +701,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         return item
     }
 
-    private func titleWithDetail(_ title: String, _ detail: String) -> NSAttributedString {
-        let result = NSMutableAttributedString(string: title, attributes: [.font: NSFont.menuFont(ofSize: 0)])
-        result.append(NSAttributedString(string: "   \(detail)", attributes: [
-            .font: NSFont.menuFont(ofSize: NSFont.smallSystemFontSize),
-            .foregroundColor: NSColor.secondaryLabelColor,
-        ]))
-        return result
-    }
-
     // MARK: Actions
 
-    @objc private func toggleProfile(_ sender: NSMenuItem) {
-        guard let name = sender.representedObject as? String,
-              let row = model.profiles.first(where: { $0.name == name }) else { return }
+    /// Return on a highlighted profile row.
+    @objc private func toggleProfileItem(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String else { return }
+        toggleProfile(named: name)
+    }
+
+    /// Both the row's view and its menu item land here; the busy check makes
+    /// a second call for the same press a no-op.
+    private func toggleProfile(named name: String) {
+        guard !busy, let row = model.profiles.first(where: { $0.name == name }), row.isActionable else { return }
         let connect = !row.isOn
+        pendingToggle = (name, connect)
         perform(connect ? "connect \(name)" : "disconnect \(name)") { client in
             try client.setProfileConnected(name, connect)
         }
@@ -580,14 +749,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         }
     }
 
-    @objc private func toggleExitNode() {
-        guard let section = model.exitNode else { return }
-        if section.isOn {
-            clearExitNode()
-        } else if let target = section.toggleTarget {
-            perform("use exit node \(target.label)") { client in
-                try client.setExitNode(profileName: target.profileName, nodeID: target.nodeID)
-            }
+    @objc private func useLastExitNode() {
+        guard let target = model.exitNode?.lastUsed?.ref else { return }
+        perform("use exit node \(target.label)") { client in
+            try client.setExitNode(profileName: target.profileName, nodeID: target.nodeID)
         }
     }
 
@@ -633,11 +798,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             let result = Result { try action(client) }
             DispatchQueue.main.async {
                 self.busy = false
+                self.pendingToggle = nil
                 if case .failure(let error) = result {
-                    if let apiError = error as? APIError, apiError.isPermissionDenied {
-                        self.offerOperator(after: description)
-                    } else {
-                        self.showError("Could not \(description)", error)
+                    // No alert on top of an open menu: close it, and show
+                    // the alert once its tracking loop has returned.
+                    self.menu.cancelTracking()
+                    let permissionDenied = (error as? APIError)?.isPermissionDenied ?? false
+                    let message = "\(error)"
+                    RunLoop.main.perform(inModes: [.default]) {
+                        MainActor.assumeIsolated {
+                            if permissionDenied {
+                                self.offerOperator(after: description)
+                            } else {
+                                self.showError("Could not \(description)", TransportError(message))
+                            }
+                        }
                     }
                 }
                 self.refreshNow()

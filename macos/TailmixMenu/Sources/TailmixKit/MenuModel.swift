@@ -48,22 +48,70 @@ public enum IconState: Equatable {
     case badges([ProfileBadge])
 }
 
-/// The location-aware routing lines under an opted-in profile. A nil title
-/// means that item is not shown.
+/// The menu's two-line header.
+public struct MenuHeader: Equatable {
+    /// Always "tailmix".
+    public var title: String
+    public var status: String
+
+    public init(title: String, status: String) {
+        self.title = title
+        self.status = status
+    }
+}
+
+public enum StatusStyle: Equatable {
+    case secondary, warning
+}
+
+public struct StatusSegment: Equatable {
+    public var text: String
+    public var style: StatusStyle
+
+    public init(text: String, style: StatusStyle) {
+        self.text = text
+        self.style = style
+    }
+}
+
+/// A profile's second row. nil on ProfileRow means the profile is one row.
+public struct ProfileStatus: Equatable {
+    /// Joined with " · " when drawn.
+    public var segments: [StatusSegment]
+    /// Set when clicking the row opens this URL (needs login, link ready).
+    public var opensURL: URL?
+    /// Whether the row has a submenu: the error message (if any) first,
+    /// then the profile's location actions.
+    public var hasSubmenu: Bool
+
+    public init(segments: [StatusSegment], opensURL: URL?, hasSubmenu: Bool) {
+        self.segments = segments
+        self.opensURL = opensURL
+        self.hasSubmenu = hasSubmenu
+    }
+}
+
+/// An opted-in profile's location-aware routing: a summary for its status
+/// row and the actions for its submenu. A nil title means that action is not
+/// shown.
 public struct LocationRow: Equatable {
-    public var detail: String
+    /// Such as "at home, routes off"; reads as a continuation of the row.
+    public var summary: String
     public var markTitle: String?
     public var forgetTitle: String?
     public var overrideTitle: String?
     /// The override the override item sets: "on" or "off".
     public var overrideRoutes: String?
     public var clearOverrideTitle: String?
+
+    public var hasActions: Bool {
+        markTitle != nil || forgetTitle != nil || overrideTitle != nil || clearOverrideTitle != nil
+    }
 }
 
 public struct ProfileRow: Equatable {
     public var name: String
-    public var detail: String
-    /// Whether the profile is enabled; shown as a checkmark.
+    /// Whether the profile is enabled; shown as the switch's state.
     public var isOn: Bool
     /// False while tailmix is paused; profiles cannot change then.
     public var isActionable: Bool
@@ -73,6 +121,8 @@ public struct ProfileRow: Equatable {
     public var errorMessage: String?
     /// nil when the profile does not use location-aware routing.
     public var location: LocationRow?
+    /// The second row; nil when the profile is off and has no error.
+    public var status: ProfileStatus?
 }
 
 public struct ExitNodeChoice: Equatable {
@@ -94,21 +144,41 @@ public struct ExitNodeProfileGroup: Equatable {
     public var countries: [ExitNodeCountry]
 }
 
+/// The exit node used before the current "None", offered in the submenu so
+/// it can be turned back on.
+public struct LastUsedExitNode: Equatable {
+    public var ref: ExitNodeRef
+    /// "Last used: gateway (home)"
+    public var title: String
+    /// Offered right now and tailmix is not paused.
+    public var isActionable: Bool
+
+    public init(ref: ExitNodeRef, title: String, isActionable: Bool) {
+        self.ref = ref
+        self.title = title
+        self.isActionable = isActionable
+    }
+}
+
+/// One "Exit Node" row whose submenu holds the choices.
 public struct ExitNodeSection: Equatable {
-    /// The row that turns the exit node on and off.
-    public var toggleTitle: String
+    /// Trailing value on the main row: "None" or the node's short name.
+    public var value: String
+    /// The selected node's profile, as its menu bar badge label ("W");
+    /// nil when no exit node is selected.
+    public var badge: String?
     public var isOn: Bool
-    /// The node the toggle turns on; nil when it can only turn it off or
-    /// there is nothing to turn on.
-    public var toggleTarget: ExitNodeRef?
-    public var isToggleEnabled: Bool
-    /// Explains why the selected exit node is not carrying traffic.
+    /// The main row's value is drawn amber: on, but not carrying traffic.
+    public var isWarning: Bool
+    /// Shown amber at the top of the submenu; only when on and not carrying traffic.
     public var note: String?
+    /// Only when no exit node is selected and one is remembered.
+    public var lastUsed: LastUsedExitNode?
     public var groups: [ExitNodeProfileGroup]
 }
 
 public struct MenuModel: Equatable {
-    public var headline: String
+    public var header: MenuHeader
     public var icon: IconState
     public var isDaemonReachable: Bool
     public var profiles: [ProfileRow]
@@ -125,7 +195,7 @@ public struct MenuModel: Equatable {
                              now: Date = Date(), locale: Locale = .current, timeZone: TimeZone = .current) -> MenuModel {
         guard let snapshot else {
             return MenuModel(
-                headline: unreachableHeadline(error), icon: .unavailable, isDaemonReachable: false,
+                header: MenuHeader(title: "tailmix", status: unreachableStatus(error)), icon: .unavailable, isDaemonReachable: false,
                 profiles: [], exitNode: nil, needsOperator: false, operatorName: nil)
         }
         let paused = snapshot.status.state == "down"
@@ -134,16 +204,16 @@ public struct MenuModel: Equatable {
         }
         let connected = snapshot.status.profiles.filter { $0.runtimeState == "running" }.count
 
-        let headline: String
+        let status: String
         if paused {
-            headline = "tailmix is paused"
+            status = "Paused"
         } else if snapshot.status.profiles.isEmpty {
-            headline = "No profiles"
+            status = "No profiles"
         } else {
             let total = snapshot.status.profiles.count
-            headline = total == 1
+            status = total == 1
                 ? (connected == 1 ? "Connected" : "Not connected")
-                : "\(connected) of \(total) profiles connected"
+                : "\(connected) of \(total) connected"
         }
 
         let icon: IconState
@@ -171,7 +241,7 @@ public struct MenuModel: Equatable {
         }
 
         return MenuModel(
-            headline: headline, icon: icon, isDaemonReachable: true, profiles: profiles,
+            header: MenuHeader(title: "tailmix", status: status), icon: icon, isDaemonReachable: true, profiles: profiles,
             exitNode: exitNodeSection(snapshot, remembered: remembered, paused: paused),
             needsOperator: needsOperator, operatorName: operatorName)
     }
@@ -212,48 +282,81 @@ public struct MenuModel: Equatable {
         }
     }
 
-    static func unreachableHeadline(_ error: Error?) -> String {
-        if error is TransportError || error == nil {
-            return "tailmix daemon is not running"
-        }
-        return "tailmix: \(error!)"
+    static func unreachableStatus(_ error: Error?) -> String {
+        error is TransportError || error == nil ? "Not running" : "Unavailable"
     }
 
     static func profileRow(_ profile: Profile, paused: Bool, now: Date, locale: Locale, timeZone: TimeZone) -> ProfileRow {
-        var detail: String
-        switch profile.runtimeState {
-        case "disabled": detail = "Disconnected"
-        case "down": detail = "Paused"
-        case "running":
-            detail = profile.peerCount > 0 ? "Connected · \(profile.peerCount) \(profile.peerCount == 1 ? "peer" : "peers")" : "Connected"
-        case "starting": detail = "Connecting…"
-        case "needs-login": detail = "Needs login"
-        case "error": detail = "Error"
-        default: detail = profile.runtimeState
-        }
-        if isExpiringSoon(profile, now: now), let expiry = profile.keyExpiry {
-            detail += " · key expires \(expiryWeekday(expiry, locale: locale, timeZone: timeZone))"
-        }
         let needsLogin = profile.runtimeState == "needs-login"
         let loginURL = needsLogin && !profile.authURL.isEmpty ? URL(string: profile.authURL) : nil
+        let location = locationRow(profile)
         return ProfileRow(
-            name: profile.name, detail: detail, isOn: profile.enabled, isActionable: !paused,
-            loginURL: loginURL, waitingForLogin: needsLogin && loginURL == nil, errorMessage: profile.lastError.isEmpty ? nil : profile.lastError,
-            location: locationRow(profile))
+            name: profile.name, isOn: profile.enabled, isActionable: !paused,
+            loginURL: loginURL, waitingForLogin: needsLogin && loginURL == nil,
+            errorMessage: profile.lastError.isEmpty ? nil : profile.lastError,
+            location: location,
+            status: profileStatus(profile, loginURL: loginURL, location: location, now: now, locale: locale, timeZone: timeZone))
+    }
+
+    /// A profile's second row. The first matching rule wins: an error, then
+    /// switched off (no row), then the runtime state.
+    static func profileStatus(_ profile: Profile, loginURL: URL?, location: LocationRow?,
+                              now: Date, locale: Locale, timeZone: TimeZone) -> ProfileStatus? {
+        func plain(_ text: String, _ style: StatusStyle = .secondary) -> ProfileStatus {
+            ProfileStatus(segments: [StatusSegment(text: text, style: style)], opensURL: nil, hasSubmenu: false)
+        }
+        if !profile.lastError.isEmpty {
+            return ProfileStatus(segments: [StatusSegment(text: "Error", style: .warning)], opensURL: nil, hasSubmenu: true)
+        }
+        if !profile.enabled {
+            return nil
+        }
+        switch profile.runtimeState {
+        case "running":
+            let peers: String
+            switch profile.peerCount {
+            case 0: peers = "Connected"
+            case 1: peers = "1 peer"
+            default: peers = "\(profile.peerCount) peers"
+            }
+            var segments = [StatusSegment(text: peers, style: .secondary)]
+            if let location {
+                segments.append(StatusSegment(text: location.summary, style: .secondary))
+            }
+            if isExpiringSoon(profile, now: now), let expiry = profile.keyExpiry {
+                segments.append(StatusSegment(
+                    text: "key expires \(expiryWeekday(expiry, locale: locale, timeZone: timeZone))", style: .warning))
+            }
+            return ProfileStatus(segments: segments, opensURL: nil, hasSubmenu: location?.hasActions ?? false)
+        case "starting":
+            return plain("Connecting…")
+        case "needs-login":
+            guard let loginURL else { return plain("Waiting for sign-in link…") }
+            return ProfileStatus(
+                segments: [StatusSegment(text: "Needs login — Log in…", style: .warning)], opensURL: loginURL, hasSubmenu: false)
+        case "error":
+            return plain("Error", .warning)
+        case "down":
+            return plain("Paused")
+        case "disabled":
+            return plain("Disconnected")
+        default:
+            return plain(profile.runtimeState)
+        }
     }
 
     static func locationRow(_ profile: Profile) -> LocationRow? {
         guard let location = profile.location else { return nil }
         let place: String
         switch location.current {
-        case "home": place = "At home"
-        case "away": place = "Away"
-        default: place = "Location unknown"
+        case "home": place = "at home"
+        case "away": place = "away"
+        default: place = "location unknown"
         }
         let hasOverride = !location.override.isEmpty
-        var detail = "\(place): routes \(profile.routesInEffect ? "on" : "off")"
+        var summary = "\(place), routes \(profile.routesInEffect ? "on" : "off")"
         if hasOverride {
-            detail += " (override)"
+            summary += " (override)"
         }
 
         var overrideTitle: String?
@@ -268,7 +371,7 @@ public struct MenuModel: Equatable {
         }
 
         return LocationRow(
-            detail: detail,
+            summary: summary,
             markTitle: location.networkAvailable && !location.onHomeNetwork ? "This network is home" : nil,
             forgetTitle: location.onHomeNetwork ? "Forget this network" : nil,
             overrideTitle: overrideTitle, overrideRoutes: overrideRoutes,
@@ -338,20 +441,21 @@ public struct MenuModel: Equatable {
                 default: note = "Waiting"
                 }
             }
+            let names = snapshot.status.profiles.map(\.name)
+            let badge = names.firstIndex(of: selected.profileName).map { badgeLabels(names)[$0] }
+                ?? badgeLabels([selected.profileName]).first
             return ExitNodeSection(
-                toggleTitle: "Exit Node: \(host) (\(selected.profileName))", isOn: true, toggleTarget: nil,
-                isToggleEnabled: !paused, note: note, groups: groups)
+                value: host, badge: badge, isOn: true, isWarning: note != nil, note: note, lastUsed: nil, groups: groups)
         }
+        var lastUsed: LastUsedExitNode?
         if let remembered {
             let isAvailable = available.contains { $0.profileName == remembered.profileName && $0.nodeID == remembered.nodeID }
-            return ExitNodeSection(
-                toggleTitle: "Exit Node: \(remembered.label) (\(remembered.profileName))", isOn: false,
-                toggleTarget: remembered, isToggleEnabled: isAvailable && !paused,
-                note: isAvailable ? nil : "Not available right now", groups: groups)
+            lastUsed = LastUsedExitNode(
+                ref: remembered, title: "Last used: \(remembered.label) (\(remembered.profileName))",
+                isActionable: isAvailable && !paused)
         }
         return ExitNodeSection(
-            toggleTitle: "Exit Node: None", isOn: false, toggleTarget: nil, isToggleEnabled: false,
-            note: nil, groups: groups)
+            value: "None", badge: nil, isOn: false, isWarning: false, note: nil, lastUsed: lastUsed, groups: groups)
     }
 
     /// The first DNS label, which is the machine name within its tailnet.

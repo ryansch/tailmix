@@ -15,23 +15,38 @@ import Testing
     private let home = Profile(id: "p1", name: "home", enabled: true, runtimeState: "running", peerCount: 3)
     private let work = Profile(id: "p2", name: "work", enabled: false, runtimeState: "disabled")
 
+    private func texts(_ row: ProfileRow) -> [String] { row.status?.segments.map(\.text) ?? [] }
+
+    private func row(_ profile: Profile) -> ProfileRow {
+        MenuModel.build(snapshot: snapshot(profiles: [profile]), error: nil, currentUID: "501", remembered: nil).profiles[0]
+    }
+
     @Test func testUnreachableDaemon() {
         let model = MenuModel.build(snapshot: nil, error: TransportError("refused"), currentUID: "501", remembered: nil)
         #expect(model.icon == .unavailable)
         #expect(!model.isDaemonReachable)
-        #expect(model.headline == "tailmix daemon is not running")
+        #expect(model.header == MenuHeader(title: "tailmix", status: "Not running"))
+
+        let noError = MenuModel.build(snapshot: nil, error: nil, currentUID: "501", remembered: nil)
+        #expect(noError.header.status == "Not running")
+        struct Other: Error {}
+        let other = MenuModel.build(snapshot: nil, error: Other(), currentUID: "501", remembered: nil)
+        #expect(other.header.status == "Unavailable")
     }
 
     @Test func testProfilesAndHeadline() {
         let lab = Profile(id: "p3", name: "lab", enabled: true, runtimeState: "needs-login", authURL: "https://login.example/a", lastError: "boom")
         let model = MenuModel.build(snapshot: snapshot(profiles: [home, work, lab]), error: nil, currentUID: "501", remembered: nil)
-        #expect(model.headline == "1 of 3 profiles connected")
+        #expect(model.header.status == "1 of 3 connected")
         #expect(model.icon == .badges([
             ProfileBadge(label: "H", connected: true, routes: false, error: false),
             ProfileBadge(label: "W", connected: false, routes: false, error: false),
             ProfileBadge(label: "L", connected: false, routes: false, error: true, needsSignIn: true),
         ]))
-        #expect(model.profiles.map(\.detail) == ["Connected · 3 peers", "Disconnected", "Needs login"])
+        #expect(texts(model.profiles[0]) == ["3 peers"])
+        #expect(model.profiles[1].status == nil)
+        #expect(model.profiles[2].status == ProfileStatus(
+            segments: [StatusSegment(text: "Error", style: .warning)], opensURL: nil, hasSubmenu: true))
         #expect(model.profiles.map(\.isOn) == [true, false, true])
         #expect(model.profiles[2].loginURL == URL(string: "https://login.example/a"))
         #expect(model.profiles[2].errorMessage == "boom")
@@ -43,10 +58,19 @@ import Testing
     @Test func testPausedDaemonDisablesActions() {
         let paused = Profile(id: "p1", name: "home", enabled: true, runtimeState: "down")
         let model = MenuModel.build(snapshot: snapshot(state: "down", profiles: [paused]), error: nil, currentUID: "501", remembered: nil)
-        #expect(model.headline == "tailmix is paused")
+        #expect(model.header.status == "Paused")
         #expect(model.icon == .paused)
-        #expect(model.profiles[0].detail == "Paused")
+        #expect(texts(model.profiles[0]) == ["Paused"])
         #expect(!model.profiles[0].isActionable)
+    }
+
+    @Test func testSingleProfileHeader() {
+        func status(_ profiles: [Profile]) -> String {
+            MenuModel.build(snapshot: snapshot(profiles: profiles), error: nil, currentUID: "501", remembered: nil).header.status
+        }
+        #expect(status([home]) == "Connected")
+        #expect(status([work]) == "Not connected")
+        #expect(status([]) == "No profiles")
     }
 
     @Test func testOperatorPrompt() {
@@ -82,11 +106,12 @@ import Testing
             ProfileBadge(label: "W", connected: true, routes: false, error: false),
         ]))
         let section = try #require(model.exitNode)
+        #expect(section.value == "relay")
+        #expect(section.badge == "W")
         #expect(section.isOn)
-        #expect(section.isToggleEnabled)
-        #expect(section.toggleTarget == nil)
-        #expect(section.toggleTitle == "Exit Node: relay (work)")
+        #expect(!section.isWarning)
         #expect(section.note == nil)
+        #expect(section.lastUsed == nil)
 
         #expect(section.groups.map(\.profileName) == ["home", "work"])
         let homeGroup = section.groups[0]
@@ -106,30 +131,63 @@ import Testing
             ProfileBadge(label: "H", connected: true, routes: false, error: false),
             ProfileBadge(label: "W", connected: false, routes: false, error: false),
         ]))
-        #expect(model.exitNode?.toggleTitle == "Exit Node: n3 (work)")
+        #expect(model.exitNode?.value == "n3")
+        #expect(model.exitNode?.badge == "W")
+        #expect(model.exitNode?.isWarning == true)
         #expect(model.exitNode?.note == "Waiting for work to connect")
         #expect(model.exitNode?.isOn == true)
+        #expect(model.exitNode?.lastUsed == nil)
     }
 
     @Test func testRememberedExitNodeCanBeTurnedBackOn() {
         let remembered = ExitNodeRef(profileName: "home", nodeID: "n1", label: "gateway")
         let available = ExitNodes(available: [AvailableExitNode(profileID: "p1", profileName: "home", nodeID: "n1", dnsName: "gateway.home.ts.net.")])
         let on = MenuModel.build(snapshot: snapshot(profiles: [home], exitNodes: available), error: nil, currentUID: "501", remembered: remembered)
+        #expect(on.exitNode?.value == "None")
         #expect(on.exitNode?.isOn == false)
-        #expect(on.exitNode?.toggleTarget == remembered)
-        #expect(on.exitNode?.isToggleEnabled == true)
-        #expect(on.exitNode?.toggleTitle == "Exit Node: gateway (home)")
+        #expect(on.exitNode?.isWarning == false)
+        #expect(on.exitNode?.note == nil)
+        #expect(on.exitNode?.lastUsed == LastUsedExitNode(ref: remembered, title: "Last used: gateway (home)", isActionable: true))
+    }
 
+    @Test func testLastUsedUnavailable() {
+        let remembered = ExitNodeRef(profileName: "home", nodeID: "n1", label: "gateway")
         let gone = MenuModel.build(snapshot: snapshot(profiles: [home]), error: nil, currentUID: "501", remembered: remembered)
-        #expect(gone.exitNode?.isToggleEnabled == false)
-        #expect(gone.exitNode?.note == "Not available right now")
+        #expect(gone.exitNode?.value == "None")
+        #expect(gone.exitNode?.lastUsed == LastUsedExitNode(ref: remembered, title: "Last used: gateway (home)", isActionable: false))
+        #expect(gone.exitNode?.isWarning == false)
+        #expect(gone.exitNode?.note == nil)
+    }
+
+    @Test func testLastUsedWhilePaused() {
+        let remembered = ExitNodeRef(profileName: "home", nodeID: "n1", label: "gateway")
+        let pausedHome = Profile(id: "p1", name: "home", enabled: true, runtimeState: "down")
+        let available = ExitNodes(available: [AvailableExitNode(profileID: "p1", profileName: "home", nodeID: "n1", dnsName: "gateway.home.ts.net.")])
+        let paused = MenuModel.build(snapshot: snapshot(state: "down", profiles: [pausedHome], exitNodes: available),
+                                     error: nil, currentUID: "501", remembered: remembered)
+        #expect(paused.exitNode?.lastUsed?.ref == remembered)
+        #expect(paused.exitNode?.lastUsed?.isActionable == false)
+    }
+
+    @Test func testLastUsedHiddenWhileSelected() {
+        let remembered = ExitNodeRef(profileName: "home", nodeID: "n1", label: "gateway")
+        let nodes = ExitNodes(
+            selected: SelectedExitNode(profileID: "p1", profileName: "home", nodeID: "n1", dnsName: "gateway.home.ts.net.", state: "installed"),
+            available: [AvailableExitNode(profileID: "p1", profileName: "home", nodeID: "n1", dnsName: "gateway.home.ts.net.")])
+        let model = MenuModel.build(snapshot: snapshot(profiles: [home], exitNodes: nodes), error: nil, currentUID: "501", remembered: remembered)
+        #expect(model.exitNode?.value == "gateway")
+        #expect(model.exitNode?.lastUsed == nil)
     }
 
     @Test func testNoExitNodeChosenYet() {
         let available = ExitNodes(available: [AvailableExitNode(profileID: "p1", profileName: "home", nodeID: "n1", dnsName: "gateway.home.ts.net.")])
         let model = MenuModel.build(snapshot: snapshot(profiles: [home], exitNodes: available), error: nil, currentUID: "501", remembered: nil)
-        #expect(model.exitNode?.toggleTitle == "Exit Node: None")
-        #expect(model.exitNode?.isToggleEnabled == false)
+        #expect(model.exitNode?.value == "None")
+        #expect(model.exitNode?.isOn == false)
+        #expect(model.exitNode?.isWarning == false)
+        #expect(model.exitNode?.note == nil)
+        #expect(model.exitNode?.badge == nil)
+        #expect(model.exitNode?.lastUsed == nil)
     }
 
     @Test func testBadgeLabels() {
@@ -227,11 +285,69 @@ import Testing
         // now is Friday 10:00 UTC; this expiry is the same Friday at 20:00.
         let model = MenuModel.build(snapshot: snapshot(profiles: [expiring(now.addingTimeInterval(10 * 3600))]), error: nil,
                                     currentUID: "501", remembered: nil, now: now, locale: posix, timeZone: utc)
-        #expect(model.profiles[0].detail == "Connected · 2 peers · key expires Fri")
+        #expect(model.profiles[0].status?.segments == [
+            StatusSegment(text: "2 peers", style: .secondary),
+            StatusSegment(text: "key expires Fri", style: .warning)])
 
         let notSoon = MenuModel.build(snapshot: snapshot(profiles: [expiring(now.addingTimeInterval(4 * 24 * 3600))]), error: nil,
                                       currentUID: "501", remembered: nil, now: now, locale: posix, timeZone: utc)
-        #expect(notSoon.profiles[0].detail == "Connected · 2 peers")
+        #expect(texts(notSoon.profiles[0]) == ["2 peers"])
+    }
+
+    @Test func testSegmentOrderWithLocationAndExpiry() throws {
+        let utc = TimeZone(identifier: "UTC")!
+        let posix = Locale(identifier: "en_US_POSIX")
+        let profile = Profile(
+            name: "home", enabled: true, runtimeState: "running", peerCount: 2,
+            acceptAllRoutes: true, acceptAllDNSRoutes: true, routesInEffect: false,
+            location: ProfileLocation(
+                supported: true, enabled: true, current: "home", override: "",
+                networkAvailable: true, onHomeNetwork: true),
+            keyExpiry: now.addingTimeInterval(10 * 3600))
+        let model = MenuModel.build(snapshot: snapshot(profiles: [profile]), error: nil,
+                                    currentUID: "501", remembered: nil, now: now, locale: posix, timeZone: utc)
+        let row = try #require(model.profiles.first)
+        #expect(row.status?.segments == [
+            StatusSegment(text: "2 peers", style: .secondary),
+            StatusSegment(text: "at home, routes off", style: .secondary),
+            StatusSegment(text: "key expires Fri", style: .warning)])
+    }
+
+    @Test func testOnePeerAndZeroPeers() {
+        #expect(texts(row(Profile(name: "home", enabled: true, runtimeState: "running", peerCount: 1))) == ["1 peer"])
+        #expect(texts(row(Profile(name: "home", enabled: true, runtimeState: "running", peerCount: 0))) == ["Connected"])
+    }
+
+    @Test func testConnecting() {
+        #expect(texts(row(Profile(name: "home", enabled: true, runtimeState: "starting"))) == ["Connecting…"])
+    }
+
+    @Test func testErrorStateWithoutMessage() {
+        let profile = row(Profile(name: "home", enabled: true, runtimeState: "error", lastError: ""))
+        #expect(profile.status == ProfileStatus(
+            segments: [StatusSegment(text: "Error", style: .warning)], opensURL: nil, hasSubmenu: false))
+    }
+
+    @Test func testErrorShownForOffProfile() {
+        let profile = row(Profile(name: "home", enabled: false, runtimeState: "disabled", lastError: "x"))
+        #expect(profile.status == ProfileStatus(
+            segments: [StatusSegment(text: "Error", style: .warning)], opensURL: nil, hasSubmenu: true))
+        #expect(profile.errorMessage == "x")
+    }
+
+    @Test func testErrorWinsOverLogin() {
+        let profile = row(Profile(name: "home", enabled: true, runtimeState: "needs-login",
+                                  authURL: "https://login.example/a", lastError: "boom"))
+        #expect(profile.status == ProfileStatus(
+            segments: [StatusSegment(text: "Error", style: .warning)], opensURL: nil, hasSubmenu: true))
+        #expect(profile.loginURL == URL(string: "https://login.example/a"))
+    }
+
+    @Test func testOtherStates() {
+        #expect(texts(row(Profile(name: "home", enabled: true, runtimeState: "down"))) == ["Paused"])
+        #expect(texts(row(Profile(name: "home", enabled: true, runtimeState: "disabled"))) == ["Disconnected"])
+        #expect(row(Profile(name: "home", enabled: true, runtimeState: "odd")).status == ProfileStatus(
+            segments: [StatusSegment(text: "odd", style: .secondary)], opensURL: nil, hasSubmenu: false))
     }
 
     @Test func testWaitingForLogin() {
@@ -241,6 +357,11 @@ import Testing
         #expect(model.profiles.map(\.waitingForLogin) == [true, false, false])
         #expect(model.profiles[0].loginURL == nil)
         #expect(model.profiles[1].loginURL == URL(string: "https://login.example/a"))
+        #expect(texts(model.profiles[0]) == ["Waiting for sign-in link…"])
+        #expect(model.profiles[0].status?.opensURL == nil)
+        #expect(model.profiles[1].status == ProfileStatus(
+            segments: [StatusSegment(text: "Needs login — Log in…", style: .warning)],
+            opensURL: URL(string: "https://login.example/a"), hasSubmenu: false))
     }
 
     private func locationRow(
@@ -263,15 +384,30 @@ import Testing
         #expect(model.profiles[0].location == nil)
     }
 
-    @Test func testLocationDetail() throws {
-        #expect(try locationRow(current: "home", routesInEffect: false).location?.detail == "At home: routes off")
-        #expect(try locationRow(current: "away", routesInEffect: true).location?.detail == "Away: routes on")
-        #expect(try locationRow(current: "unknown", routesInEffect: true).location?.detail == "Location unknown: routes on")
-        #expect(try locationRow(current: "away", override: "off", routesInEffect: false).location?.detail == "Away: routes off (override)")
-        #expect(try locationRow(current: "home", override: "on", routesInEffect: true).location?.detail == "At home: routes on (override)")
+    @Test func testLocationSummary() throws {
+        #expect(try locationRow(current: "home", routesInEffect: false).location?.summary == "at home, routes off")
+        #expect(try locationRow(current: "away", routesInEffect: true).location?.summary == "away, routes on")
+        #expect(try locationRow(current: "unknown", routesInEffect: true).location?.summary == "location unknown, routes on")
+        #expect(try locationRow(current: "away", override: "off", routesInEffect: false).location?.summary == "away, routes off (override)")
+        #expect(try locationRow(current: "home", override: "on", routesInEffect: true).location?.summary == "at home, routes on (override)")
         // Configured accept-all off everywhere: the word still follows routesInEffect.
         #expect(try locationRow(current: "away", routesInEffect: false, acceptAllRoutes: false, acceptAllDNSRoutes: false)
-            .location?.detail == "Away: routes off")
+            .location?.summary == "away, routes off")
+    }
+
+    @Test func testLocationRowSegments() throws {
+        let profile = try locationRow(current: "home", routesInEffect: false)
+        #expect(texts(profile) == ["Connected", "at home, routes off"])
+        #expect(profile.status?.segments.map(\.style) == [.secondary, .secondary])
+        #expect(profile.location?.overrideTitle == "Use home routes now")
+        #expect(profile.status?.hasSubmenu == true)
+    }
+
+    @Test func testLocationWithoutActionsIsPlain() throws {
+        let profile = try locationRow(routesInEffect: false, acceptAllRoutes: false, acceptAllDNSRoutes: false,
+                                      networkAvailable: false)
+        #expect(profile.location?.hasActions == false)
+        #expect(profile.status?.hasSubmenu == false)
     }
 
     @Test func testMarkAndForgetTitles() throws {
