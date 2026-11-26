@@ -46,7 +46,6 @@ type Profile struct {
 	Alias               string               `json:"alias,omitempty"`
 	Kind                string               `json:"kind,omitempty"`
 	StateDir            string               `json:"stateDir"`
-	Hostname            string               `json:"hostname,omitempty"`
 	MagicDNSSuffix      string               `json:"magicDnsSuffix,omitempty"`
 	Disabled            bool                 `json:"disabled,omitempty"`
 	Removed             bool                 `json:"removed,omitempty"`

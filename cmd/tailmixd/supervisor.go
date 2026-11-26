@@ -54,6 +54,9 @@ type daemonConfig struct {
 	// LocationGrace is how long a profile must be off its home networks
 	// before it moves away; 0 means 60s.
 	LocationGrace time.Duration
+	// Interfaces lists host interfaces to detect another connected
+	// Tailscale client. Nil disables the check.
+	Interfaces func() ([]interfaceAddrs, error)
 }
 
 type managedProfile struct {
@@ -699,6 +702,7 @@ func (s *supervisor) setExitNodePreferencesLocked(statuses []tailmixprofile.Stat
 
 func (s *supervisor) configureDNSLocked(cfg tailmixdns.LiveConfig) error {
 	nextForwarders := make([]*tailmixdns.Forwarder, 0, len(cfg.Routes))
+	names := tailmixdns.NewMagicDNSNames(cfg.Domains, cfg.Records)
 	for i := range cfg.Routes {
 		if cfg.Routes[i].ProfileDNS {
 			managed := s.runtimes[cfg.Routes[i].ProfileID]
@@ -711,7 +715,7 @@ func (s *supervisor) configureDNSLocked(cfg tailmixdns.LiveConfig) error {
 				closeForwarders(nextForwarders)
 				return fmt.Errorf("profile %q does not expose its effective DNS resolver", s.nameForIDLocked(cfg.Routes[i].ProfileID))
 			}
-			forwarder, err := tailmixdns.StartProfileDNSForwarder(s.ctx, queryer)
+			forwarder, err := tailmixdns.StartProfileDNSForwarder(s.ctx, queryer, names)
 			if err != nil {
 				closeForwarders(nextForwarders)
 				return fmt.Errorf("start profile %q effective DNS forwarder: %w", s.nameForIDLocked(cfg.Routes[i].ProfileID), err)
@@ -728,7 +732,7 @@ func (s *supervisor) configureDNSLocked(cfg tailmixdns.LiveConfig) error {
 			closeForwarders(nextForwarders)
 			return fmt.Errorf("DNS route %q selected unavailable profile %q", cfg.Routes[i].Suffix, cfg.Routes[i].ProfileID)
 		}
-		forwarder, err := tailmixdns.StartForwarder(s.ctx, managed.runtime.Engine, cfg.Routes[i].Resolvers)
+		forwarder, err := tailmixdns.StartForwarder(s.ctx, managed.runtime.Engine, cfg.Routes[i].Resolvers, names)
 		if err != nil {
 			closeForwarders(nextForwarders)
 			return fmt.Errorf("start profile %q DNS forwarder: %w", s.nameForIDLocked(cfg.Routes[i].ProfileID), err)
@@ -873,7 +877,6 @@ func (s *supervisor) projectProfileLocked(configured state.Profile) controlapi.P
 		Name:               profileName(configured),
 		Kind:               kind,
 		StateDir:           configured.StateDir,
-		Hostname:           configured.Hostname,
 		Enabled:            !configured.Disabled && !configured.Removed,
 		Removed:            configured.Removed,
 		AcceptAllRoutes:    configured.AcceptAllRoutes,
@@ -1012,9 +1015,6 @@ func (s *supervisor) AddProfile(_ context.Context, request controlapi.AddProfile
 		}
 		existing.Removed = false
 		existing.Disabled = request.Disabled
-		if request.Hostname != "" {
-			existing.Hostname = request.Hostname
-		}
 		if err := s.store.Save(s.st); err != nil {
 			s.st = before
 			return controlapi.Profile{}, err
@@ -1034,14 +1034,6 @@ func (s *supervisor) AddProfile(_ context.Context, request controlapi.AddProfile
 	if err != nil {
 		return controlapi.Profile{}, err
 	}
-	hostname := strings.TrimSpace(request.Hostname)
-	if hostname == "" {
-		suffix, err := randomOpaque("", 5)
-		if err != nil {
-			return controlapi.Profile{}, err
-		}
-		hostname = "tailmix-" + suffix
-	}
 	stateDir := strings.TrimSpace(request.StateDir)
 	if stateDir == "" {
 		stateDir = defaultProfileStateDir(s.store.Path(), id)
@@ -1055,7 +1047,6 @@ func (s *supervisor) AddProfile(_ context.Context, request controlapi.AddProfile
 		Name:     request.Name,
 		Kind:     state.ProfileKindTailscale,
 		StateDir: stateDir,
-		Hostname: hostname,
 		Disabled: request.Disabled,
 	}
 	s.st.Profiles = append(s.st.Profiles, configured)
@@ -1109,13 +1100,6 @@ func (s *supervisor) PatchProfile(_ context.Context, name string, request contro
 		if renamedWireGuard != nil {
 			configured.WireGuard = renamedWireGuard
 		}
-	}
-	if request.Hostname != nil && configured.Kind != "" && configured.Kind != state.ProfileKindTailscale {
-		return controlapi.Profile{}, controlapi.NewError("invalid_request", "profile %q is not a Tailscale profile", name)
-	}
-	if request.Hostname != nil && configured.Hostname != strings.TrimSpace(*request.Hostname) {
-		configured.Hostname = strings.TrimSpace(*request.Hostname)
-		restart = true
 	}
 	if err := s.store.Save(s.st); err != nil {
 		s.st = before

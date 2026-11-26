@@ -1561,6 +1561,22 @@ func TestStatusShowsProfileLocation(t *testing.T) {
 	}
 }
 
+func TestProfileNodeNameDropsTailnetSuffix(t *testing.T) {
+	for _, tc := range []struct {
+		profile controlapi.Profile
+		want    string
+	}{
+		{controlapi.Profile{SelfDNSName: "laptop.tailxyz.ts.net.", MagicDNSSuffix: "tailxyz.ts.net"}, "laptop"},
+		{controlapi.Profile{SelfDNSName: "laptop.tailxyz.ts.net", MagicDNSSuffix: "tailxyz.ts.net."}, "laptop"},
+		{controlapi.Profile{SelfDNSName: "laptop.other.example.", MagicDNSSuffix: "tailxyz.ts.net"}, "laptop.other.example"},
+		{controlapi.Profile{}, ""},
+	} {
+		if got := profileNodeName(tc.profile); got != tc.want {
+			t.Errorf("profileNodeName(%q, %q) = %q, want %q", tc.profile.SelfDNSName, tc.profile.MagicDNSSuffix, got, tc.want)
+		}
+	}
+}
+
 func TestProfilesListOmitsLocation(t *testing.T) {
 	client := &fakeManagementClient{statusProfiles: []controlapi.Profile{{Name: "work"}}}
 	var stdout bytes.Buffer
@@ -1568,5 +1584,14 @@ func TestProfilesListOmitsLocation(t *testing.T) {
 		testDependencies(client, &stdout, io.Discard, nil))
 	if strings.Contains(stdout.String(), "LOCATION") {
 		t.Fatalf("profiles list shows LOCATION:\n%s", stdout.String())
+	}
+}
+
+func TestStatusShowsDaemonWarnings(t *testing.T) {
+	warning := "another Tailscale client is connected"
+	var out bytes.Buffer
+	writeStatus(&out, controlapi.Status{State: "up", Warnings: []string{warning}})
+	if !strings.Contains(out.String(), warning) {
+		t.Fatalf("status output omits daemon warning:\n%s", out.String())
 	}
 }

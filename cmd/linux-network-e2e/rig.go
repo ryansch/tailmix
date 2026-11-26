@@ -357,7 +357,9 @@ host-record=proxy4.corp.test,%s,60
 host-record=proxy6.corp.test,%s,60
 host-record=outage.corp.test,%s,60
 cname=alias.corp.test,proxy.corp.test
-`, v4, v6, v4, v6, v4)
+host-record=resolver.isolated.test,%s,%s,60
+cname=node.corp.test,resolver.isolated.test
+`, v4, v6, v4, v6, v4, v4, v6)
 	require(privateWrite(filepath.Join(r.tmp, "peer", "dnsmasq.conf"), config) == nil, "private resolver config")
 	r.e("peer", "dnsmasq", "--conf-file=/private/dnsmasq.conf")
 }
@@ -374,7 +376,7 @@ func (r *rig) setupClient() {
 	r.d("exec", "-d", r.names["client"], "sh", "-c",
 		"echo $$ > /private/app.pid; exec /checkout/tailmixd --mode=tun "+
 			"--auto-update=false --state=/private/state.json --socket-dir=/private/sockets "+
-			"--profile=id=work,dir=/private/work,hostname=client,auth-key-env=TEST_AUTHKEY "+
+			"--profile=id=work,dir=/private/work,auth-key-env=TEST_AUTHKEY "+
 			"> /private/daemon.log 2>&1")
 	r.clientStarted = true
 	r.poll(60*time.Second, r.ready)

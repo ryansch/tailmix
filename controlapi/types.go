@@ -56,7 +56,6 @@ type Profile struct {
 	Name                   string                  `json:"name"`
 	Kind                   string                  `json:"kind,omitempty"`
 	StateDir               string                  `json:"stateDir"`
-	Hostname               string                  `json:"hostname,omitempty"`
 	Enabled                bool                    `json:"enabled"`
 	Removed                bool                    `json:"removed"`
 	AcceptAllRoutes        bool                    `json:"acceptAllRoutes"`
@@ -165,6 +164,7 @@ type Profiles struct {
 // through their dedicated list endpoints.
 type Status struct {
 	State         string        `json:"state"`
+	Warnings      []string      `json:"warnings,omitempty"`
 	Profiles      []Profile     `json:"profiles"`
 	IPRoutes      IPRoutes      `json:"ipRoutes"`
 	ExitNodes     ExitNodes     `json:"exitNodes"`
@@ -175,14 +175,12 @@ type Status struct {
 type AddProfileRequest struct {
 	Name     string `json:"name"`
 	StateDir string `json:"stateDir,omitempty"`
-	Hostname string `json:"hostname,omitempty"`
 	AuthKey  string `json:"authKey,omitempty"`
 	Disabled bool   `json:"disabled,omitempty"`
 }
 
 type PatchProfileRequest struct {
-	Name     *string `json:"name,omitempty"`
-	Hostname *string `json:"hostname,omitempty"`
+	Name *string `json:"name,omitempty"`
 }
 
 type AvailableIPRoute struct {
