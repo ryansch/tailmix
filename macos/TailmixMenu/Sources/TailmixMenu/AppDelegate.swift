@@ -2,6 +2,7 @@
 import AppKit
 import ServiceManagement
 import TailmixKit
+@preconcurrency import UserNotifications
 
 /// Wraps an exit node choice for NSMenuItem.representedObject.
 private final class ExitNodeBox: NSObject {
@@ -22,7 +23,8 @@ private final class RoutesOverrideBox: NSObject {
 
 /// Draws the menu bar icon: one rounded badge per profile.
 private enum BadgeIcon {
-    static let height: CGFloat = 16
+    // Tall enough to centre the badge with room for the routes bar below it.
+    static let height: CGFloat = 18
     static let badgeHeight: CGFloat = 12
     static let minBadgeWidth: CGFloat = 12
     static let spacing: CGFloat = 2
@@ -30,35 +32,52 @@ private enum BadgeIcon {
     static let lineWidth: CGFloat = 1.3
     static let cornerRadius: CGFloat = 3
     static let font = NSFont.systemFont(ofSize: 9.5, weight: .bold)
+    /// The amber dot on a badge whose key expires soon.
+    static let expiringDotDiameter: CGFloat = 4.5
+    /// The amber dot with "!" on a badge that needs sign-in.
+    static let signInDotDiameter: CGFloat = 6.5
+    /// The clear ring that separates a dot from the badge under it.
+    static let dotGap: CGFloat = 1
+    static let bangFont = NSFont.systemFont(ofSize: 6, weight: .black)
 
-    /// A template image unless a badge shows an error; then the colours are
-    /// fixed, resolved against the menu bar's appearance.
+    /// A template image unless a badge shows an error or a sign-in mark;
+    /// then the colours are fixed, resolved against the menu bar's appearance.
     static func image(_ badges: [ProfileBadge], appearance: NSAppearance, description: String) -> NSImage {
-        let hasError = badges.contains(where: \.error)
+        let hasColor = badges.contains { $0.error || $0.expiringSoon || $0.needsSignIn }
         var normal = NSColor.black.cgColor
         var warning = NSColor.black.cgColor
-        if hasError {
+        if hasColor {
             appearance.performAsCurrentDrawingAppearance {
                 normal = NSColor.labelColor.cgColor
                 warning = NSColor.systemOrange.cgColor
             }
         }
         let widths = badges.map(badgeWidth)
-        let width = max(widths.reduce(0, +) + spacing * CGFloat(max(badges.count - 1, 0)), 1)
+        var rects: [NSRect] = []
+        var x: CGFloat = 0
+        for badgeWidth in widths {
+            rects.append(NSRect(x: x, y: (height - badgeHeight) / 2, width: badgeWidth, height: badgeHeight))
+            x += badgeWidth + spacing
+        }
+        // Room for the last badge's mark, which overhangs its right edge,
+        // rounded up to whole points so the badges stay on the pixel grid.
+        let overhang = badges.last.flatMap(markDiameter).map { $0 / 2 } ?? 0
+        let width = max(ceil((rects.last?.maxX ?? 0) + overhang), 1)
         let image = NSImage(size: NSSize(width: width, height: height), flipped: false) { _ in
             guard let context = NSGraphicsContext.current?.cgContext else { return false }
             // The knocked-out labels clear only this layer, not what is behind the image.
             context.beginTransparencyLayer(auxiliaryInfo: nil)
-            var x: CGFloat = 0
-            for (badge, badgeWidth) in zip(badges, widths) {
-                draw(badge, in: NSRect(x: x, y: height - badgeHeight, width: badgeWidth, height: badgeHeight),
-                     color: badge.error ? warning : normal, context: context)
-                x += badgeWidth + spacing
+            for (badge, rect) in zip(badges, rects) {
+                draw(badge, in: rect, color: badge.error ? warning : normal, context: context)
+            }
+            // Marks go on top, so a mark's gap also clears the next badge's edge.
+            for (badge, rect) in zip(badges, rects) {
+                drawMark(badge, on: rect, color: warning, context: context)
             }
             context.endTransparencyLayer()
             return true
         }
-        image.isTemplate = !hasError
+        image.isTemplate = !hasColor
         image.accessibilityDescription = description
         return image
     }
@@ -69,6 +88,11 @@ private enum BadgeIcon {
             let name = index < names.count ? names[index] : badge.label
             var state = badge.connected ? "connected, routes \(badge.routes ? "on" : "off")" : "off"
             if badge.error { state += ", error" }
+            if badge.needsSignIn {
+                state += ", needs sign-in"
+            } else if badge.expiringSoon {
+                state += ", key expires soon"
+            }
             return "\(name) \(state)"
         }
         return parts.isEmpty ? "tailmix" : "tailmix: " + parts.joined(separator: "; ")
@@ -86,7 +110,7 @@ private enum BadgeIcon {
     /// Centring the glyphs' own bounds, not the font's line box, keeps the
     /// letters clear of the badge's top edge (the line box is taller than
     /// ascender plus descender).
-    private static func drawLabel(_ text: String, centredIn rect: NSRect, context: CGContext) {
+    private static func drawLabel(_ text: String, centredIn rect: NSRect, font: NSFont = font, context: CGContext) {
         let attributes: [NSAttributedString.Key: Any] = [
             .font: font,
             NSAttributedString.Key(kCTForegroundColorFromContextAttributeName as String): true,
@@ -125,11 +149,41 @@ private enum BadgeIcon {
             context.fillPath()
         }
     }
+
+    /// The mark's diameter: needs sign-in wins over expiring soon.
+    private static func markDiameter(_ badge: ProfileBadge) -> CGFloat? {
+        if badge.needsSignIn { return signInDotDiameter }
+        if badge.expiringSoon { return expiringDotDiameter }
+        return nil
+    }
+
+    /// Draws the amber dot centred on the badge's top-right corner, moved
+    /// down just enough to stay inside the image, with a clear ring around it
+    /// and, for needs sign-in, a knocked-out "!".
+    private static func drawMark(_ badge: ProfileBadge, on rect: NSRect, color: CGColor, context: CGContext) {
+        guard let diameter = markDiameter(badge) else { return }
+        let radius = diameter / 2
+        let centre = CGPoint(x: rect.maxX, y: min(rect.maxY, height - radius))
+        let dot = CGRect(x: centre.x - radius, y: centre.y - radius, width: diameter, height: diameter)
+        context.saveGState()
+        context.setBlendMode(.destinationOut)
+        context.fillEllipse(in: dot.insetBy(dx: -dotGap, dy: -dotGap))
+        context.restoreGState()
+        context.setFillColor(color)
+        context.fillEllipse(in: dot)
+        if badge.needsSignIn {
+            context.saveGState()
+            context.setBlendMode(.destinationOut)
+            drawLabel("!", centredIn: dot, font: bangFont, context: context)
+            context.restoreGState()
+        }
+    }
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotificationCenterDelegate {
     private static let rememberedExitNodeKey = "LastExitNode"
+    private static let sentNotificationsKey = "signInNotificationsSent"
     private static let socketDirectoryKey = "SocketDirectory"
     private static let backgroundRefreshInterval: TimeInterval = 10
 
@@ -160,6 +214,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Reads must not hold up the menu; profile starts can take longer.
     private var readClient: ControlClient { ControlClient(socketDirectory: socketDirectory, timeout: 2) }
     private var actionClient: ControlClient { ControlClient(socketDirectory: socketDirectory, timeout: 60) }
+
+    /// The notification delegate must be set before launch finishes, so a
+    /// click on a notification that launched the app is delivered.
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        notificationCenter?.delegate = self
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -218,6 +278,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let label = MenuModel.shortName(selected.dnsName, fallback: selected.nodeID)
             let ref = ExitNodeRef(profileName: selected.profileName, nodeID: selected.nodeID, label: label)
             if rememberedExitNode != ref { rememberedExitNode = ref }
+        }
+        if let snapshot {
+            notifySignIn(snapshot.status.profiles)
         }
         let next = MenuModel.build(snapshot: snapshot, error: error, currentUID: currentUID, remembered: rememberedExitNode)
         updateIcon(next)
@@ -341,6 +404,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 login.representedObject = url
                 login.indentationLevel = 1
                 menu.addItem(login)
+            } else if row.waitingForLogin {
+                let title = "Waiting for sign-in link…"
+                let waiting = disabledItem(title, indent: Self.locationIndent)
+                waiting.attributedTitle = locationTitle(title, color: nil)
+                menu.addItem(waiting)
             }
             if let location = row.location {
                 addLocationItems(location, for: row)
@@ -575,6 +643,78 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.refreshNow()
                 self.rebuildMenu()
             }
+        }
+    }
+
+    // MARK: Notifications
+
+    /// nil when not running from an app bundle (for example `swift run`),
+    /// where the notification center is unavailable.
+    private var notificationCenter: UNUserNotificationCenter? {
+        Bundle.main.bundleIdentifier == nil ? nil : UNUserNotificationCenter.current()
+    }
+
+    private var sentNotifications: Set<String> {
+        get { Set(UserDefaults.standard.stringArray(forKey: Self.sentNotificationsKey) ?? []) }
+        set { UserDefaults.standard.set(newValue.sorted(), forKey: Self.sentNotificationsKey) }
+    }
+
+    /// Posts each sign-in notification once per episode. Called only with a
+    /// snapshot from the daemon, so an unreachable daemon leaves the
+    /// remembered episodes alone.
+    private func notifySignIn(_ profiles: [Profile]) {
+        guard let center = notificationCenter else { return }
+        let sent = sentNotifications
+        let plan = SignInNotifications.plan(profiles: profiles, sent: sent, now: Date())
+        if plan.sent != sent { sentNotifications = plan.sent }
+        guard !plan.post.isEmpty else { return }
+        let requests = plan.post.map { notification in
+            let content = UNMutableNotificationContent()
+            content.title = notification.title
+            content.body = notification.body
+            content.sound = .default
+            content.userInfo = ["profileID": notification.profileID]
+            return UNNotificationRequest(identifier: notification.key, content: content, trigger: nil)
+        }
+        // Asks for permission the first time; once decided, macOS remembers.
+        center.requestAuthorization(options: [.alert, .sound]) { granted, error in
+            if let error {
+                NSLog("tailmix Menu: notifications not authorized: %@", error.localizedDescription)
+            }
+            guard granted else { return }
+            for request in requests {
+                center.add(request) { error in
+                    if let error {
+                        NSLog("tailmix Menu: could not post notification: %@", error.localizedDescription)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Shows notifications even while the menu is open.
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
+                                            withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler([.banner, .sound])
+    }
+
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
+                                            withCompletionHandler completionHandler: @escaping () -> Void) {
+        let profileID = response.notification.request.content.userInfo["profileID"] as? String
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated { self.openSignIn(profileID: profileID) }
+        }
+        completionHandler()
+    }
+
+    /// Opens the profile's sign-in link, or the menu when there is none yet.
+    private func openSignIn(profileID: String?) {
+        refreshNow()
+        if let profile = snapshot?.status.profiles.first(where: { $0.id == profileID }),
+           !profile.authURL.isEmpty, let url = URL(string: profile.authURL) {
+            NSWorkspace.shared.open(url)
+        } else {
+            statusItem.button?.performClick(nil)
         }
     }
 

@@ -8,6 +8,15 @@ A macOS menu bar app for tailmix. From the menu bar you can:
 - turn the exit node off and back on (the app remembers the last one);
 - open a profile's login page when it needs a login.
 
+A small amber dot on a profile's badge means its key expires within 3 days;
+a larger amber dot with "!" means the profile needs you to sign in. The menu
+then offers **Log in to <profile>…**, or shows **Waiting for sign-in link…**
+until tailmixd has a link. The app also posts one notification when a key is
+about to expire and one when it has expired; clicking the second opens the
+sign-in page, or the menu while tailmix is still waiting for the link. macOS
+asks once whether to allow these notifications. If you don't, the badges and
+menu still show the same information.
+
 It talks to `tailmixd` over its control socket (`/var/run/tailmix/tailmixd.sock`)
 and reads the state every few seconds and each time the menu opens.
 

@@ -29,7 +29,7 @@ import Testing
         #expect(model.icon == .badges([
             ProfileBadge(label: "H", connected: true, routes: false, error: false),
             ProfileBadge(label: "W", connected: false, routes: false, error: false),
-            ProfileBadge(label: "L", connected: false, routes: false, error: true),
+            ProfileBadge(label: "L", connected: false, routes: false, error: true, needsSignIn: true),
         ]))
         #expect(model.profiles.map(\.detail) == ["Connected · 3 peers", "Disconnected", "Needs login"])
         #expect(model.profiles.map(\.isOn) == [true, false, true])
@@ -177,6 +177,70 @@ import Testing
             ProfileBadge(label: "H", connected: false, routes: false, error: true),
             ProfileBadge(label: "W", connected: false, routes: false, error: false),
         ]))
+    }
+
+    /// Friday 2026-11-27 10:00 UTC.
+    private let now = Date(timeIntervalSince1970: 1_795_773_600)
+
+    private func expiring(_ expiry: Date?, state: String = "running") -> Profile {
+        Profile(name: "home", enabled: true, runtimeState: state, peerCount: 2, keyExpiry: expiry)
+    }
+
+    @Test func testIsExpiringSoon() {
+        let window = MenuModel.expiryWarning
+        #expect(window == 3 * 24 * 3600)
+        #expect(MenuModel.isExpiringSoon(expiring(now.addingTimeInterval(window)), now: now))
+        #expect(MenuModel.isExpiringSoon(expiring(now.addingTimeInterval(1)), now: now))
+        #expect(!MenuModel.isExpiringSoon(expiring(now.addingTimeInterval(window + 1)), now: now))
+        #expect(!MenuModel.isExpiringSoon(expiring(now.addingTimeInterval(-1)), now: now))
+        #expect(!MenuModel.isExpiringSoon(expiring(now), now: now))
+        #expect(!MenuModel.isExpiringSoon(expiring(nil), now: now))
+        #expect(!MenuModel.isExpiringSoon(expiring(now.addingTimeInterval(3600), state: "starting"), now: now))
+        #expect(!MenuModel.isExpiringSoon(expiring(now.addingTimeInterval(3600), state: "needs-login"), now: now))
+    }
+
+    @Test func testExpiryWeekday() {
+        let utc = TimeZone(identifier: "UTC")!
+        let posix = Locale(identifier: "en_US_POSIX")
+        #expect(MenuModel.expiryWeekday(now, locale: posix, timeZone: utc) == "Fri")
+        #expect(MenuModel.expiryWeekday(now, locale: posix, timeZone: TimeZone(identifier: "Pacific/Honolulu")!) == "Fri")
+        #expect(MenuModel.expiryWeekday(now.addingTimeInterval(-11 * 3600), locale: posix, timeZone: utc) == "Thu")
+    }
+
+    @Test func testBadgeFlags() {
+        let needsLogin = Profile(name: "home", enabled: true, runtimeState: "needs-login",
+                                 keyExpiry: now.addingTimeInterval(3600), keyExpired: true)
+        let soon = Profile(name: "work", enabled: true, runtimeState: "running", keyExpiry: now.addingTimeInterval(3600))
+        let later = Profile(name: "lab", enabled: true, runtimeState: "running", keyExpiry: now.addingTimeInterval(10 * 24 * 3600))
+        let model = MenuModel.build(snapshot: snapshot(profiles: [needsLogin, soon, later]), error: nil,
+                                    currentUID: "501", remembered: nil, now: now)
+        #expect(model.icon == .badges([
+            ProfileBadge(label: "H", connected: false, routes: false, error: false, needsSignIn: true),
+            ProfileBadge(label: "W", connected: true, routes: false, error: false, expiringSoon: true),
+            ProfileBadge(label: "L", connected: true, routes: false, error: false),
+        ]))
+    }
+
+    @Test func testExpiringRowDetail() {
+        let utc = TimeZone(identifier: "UTC")!
+        let posix = Locale(identifier: "en_US_POSIX")
+        // now is Friday 10:00 UTC; this expiry is the same Friday at 20:00.
+        let model = MenuModel.build(snapshot: snapshot(profiles: [expiring(now.addingTimeInterval(10 * 3600))]), error: nil,
+                                    currentUID: "501", remembered: nil, now: now, locale: posix, timeZone: utc)
+        #expect(model.profiles[0].detail == "Connected · 2 peers · key expires Fri")
+
+        let notSoon = MenuModel.build(snapshot: snapshot(profiles: [expiring(now.addingTimeInterval(4 * 24 * 3600))]), error: nil,
+                                      currentUID: "501", remembered: nil, now: now, locale: posix, timeZone: utc)
+        #expect(notSoon.profiles[0].detail == "Connected · 2 peers")
+    }
+
+    @Test func testWaitingForLogin() {
+        let waiting = Profile(name: "home", enabled: true, runtimeState: "needs-login", keyExpired: true)
+        let withLink = Profile(name: "work", enabled: true, runtimeState: "needs-login", authURL: "https://login.example/a")
+        let model = MenuModel.build(snapshot: snapshot(profiles: [waiting, withLink, home]), error: nil, currentUID: "501", remembered: nil)
+        #expect(model.profiles.map(\.waitingForLogin) == [true, false, false])
+        #expect(model.profiles[0].loginURL == nil)
+        #expect(model.profiles[1].loginURL == URL(string: "https://login.example/a"))
     }
 
     private func locationRow(

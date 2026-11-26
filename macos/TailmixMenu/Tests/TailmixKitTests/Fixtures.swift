@@ -9,6 +9,10 @@ enum Fixtures {
 
     static let exitNodes = #"{"selected":{"profileId":"p1","profileName":"home","nodeId":"nGW","dnsName":"gateway.home.ts.net.","peerIp":"100.64.0.9","online":true,"state":"installed"},"available":[{"profileId":"p1","profileName":"home","nodeId":"nGW","dnsName":"gateway.home.ts.net.","online":true},{"profileId":"p1","profileName":"home","nodeId":"nDE","dnsName":"de-ber-wg-001.mullvad.ts.net.","online":true,"location":{"country":"Germany","countryCode":"DE","city":"Berlin","cityCode":"BER","priority":50}}]}"#
 
+    // Hand-written, not generated: one profile with a key expiring soon and
+    // one that needs a login because its key expired.
+    static let keyStatus = #"{"state":"up","profiles":[{"id":"p1","name":"home","kind":"tailscale","stateDir":"","enabled":true,"removed":false,"acceptAllRoutes":false,"acceptAllDnsRoutes":false,"runtimeState":"running","peerCount":2,"shieldsUp":false,"keyExpiry":"2026-11-27T10:00:00.123456789Z"},{"id":"p2","name":"work","kind":"tailscale","stateDir":"","enabled":true,"removed":false,"acceptAllRoutes":false,"acceptAllDnsRoutes":false,"runtimeState":"needs-login","peerCount":0,"shieldsUp":false,"keyExpiry":"2026-11-20T08:30:00-05:00","keyExpired":true}],"ipRoutes":{},"exitNodes":{},"dnsRoutes":{},"searchDomains":{"desired":null}}"#
+
     static let operatorInfo = #"{"uid":"501","username":"alice"}"#
 
     static let permissionDenied = #"{"code":"permission_denied","message":"tailmix management commands require root"}"#

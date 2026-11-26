@@ -23,12 +23,19 @@ public struct ProfileBadge: Equatable {
     public var routes: Bool
     /// The profile has an error; drawn amber.
     public var error: Bool
+    /// The connected profile's node key expires soon.
+    public var expiringSoon: Bool
+    /// The profile needs sign-in; wins over expiringSoon.
+    public var needsSignIn: Bool
 
-    public init(label: String, connected: Bool, routes: Bool, error: Bool) {
+    public init(label: String, connected: Bool, routes: Bool, error: Bool,
+                expiringSoon: Bool = false, needsSignIn: Bool = false) {
         self.label = label
         self.connected = connected
         self.routes = routes
         self.error = error
+        self.expiringSoon = expiringSoon
+        self.needsSignIn = needsSignIn
     }
 }
 
@@ -61,6 +68,8 @@ public struct ProfileRow: Equatable {
     /// False while tailmix is paused; profiles cannot change then.
     public var isActionable: Bool
     public var loginURL: URL?
+    /// The profile needs sign-in but the daemon has no link yet.
+    public var waitingForLogin: Bool
     public var errorMessage: String?
     /// nil when the profile does not use location-aware routing.
     public var location: LocationRow?
@@ -108,14 +117,21 @@ public struct MenuModel: Equatable {
     public var needsOperator: Bool
     public var operatorName: String?
 
-    public static func build(snapshot: Snapshot?, error: Error?, currentUID: String, remembered: ExitNodeRef?) -> MenuModel {
+    /// How long before a connected profile's key expires that it counts as
+    /// expiring soon.
+    public static let expiryWarning: TimeInterval = 3 * 24 * 3600
+
+    public static func build(snapshot: Snapshot?, error: Error?, currentUID: String, remembered: ExitNodeRef?,
+                             now: Date = Date(), locale: Locale = .current, timeZone: TimeZone = .current) -> MenuModel {
         guard let snapshot else {
             return MenuModel(
                 headline: unreachableHeadline(error), icon: .unavailable, isDaemonReachable: false,
                 profiles: [], exitNode: nil, needsOperator: false, operatorName: nil)
         }
         let paused = snapshot.status.state == "down"
-        let profiles = snapshot.status.profiles.map { profileRow($0, paused: paused) }
+        let profiles = snapshot.status.profiles.map {
+            profileRow($0, paused: paused, now: now, locale: locale, timeZone: timeZone)
+        }
         let connected = snapshot.status.profiles.filter { $0.runtimeState == "running" }.count
 
         let headline: String
@@ -137,9 +153,11 @@ public struct MenuModel: Equatable {
             let labels = badgeLabels(snapshot.status.profiles.map(\.name))
             icon = .badges(zip(snapshot.status.profiles, labels).map { profile, label in
                 let isConnected = profile.runtimeState == "running"
+                let needsSignIn = profile.runtimeState == "needs-login"
                 return ProfileBadge(
                     label: label, connected: isConnected, routes: isConnected && profile.routesInEffect,
-                    error: !profile.lastError.isEmpty)
+                    error: !profile.lastError.isEmpty,
+                    expiringSoon: isExpiringSoon(profile, now: now) && !needsSignIn, needsSignIn: needsSignIn)
             })
         }
 
@@ -156,6 +174,22 @@ public struct MenuModel: Equatable {
             headline: headline, icon: icon, isDaemonReachable: true, profiles: profiles,
             exitNode: exitNodeSection(snapshot, remembered: remembered, paused: paused),
             needsOperator: needsOperator, operatorName: operatorName)
+    }
+
+    /// Whether a connected profile's node key expires after now and within
+    /// expiryWarning.
+    public static func isExpiringSoon(_ profile: Profile, now: Date) -> Bool {
+        guard profile.runtimeState == "running", let expiry = profile.keyExpiry else { return false }
+        return expiry > now && expiry <= now.addingTimeInterval(expiryWarning)
+    }
+
+    /// The abbreviated weekday of a key expiry, such as "Fri".
+    public static func expiryWeekday(_ date: Date, locale: Locale = .current, timeZone: TimeZone = .current) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = locale
+        formatter.timeZone = timeZone
+        formatter.dateFormat = "EEE"
+        return formatter.string(from: date)
     }
 
     /// The shortest prefix of each name that no other name shares, with its
@@ -185,8 +219,8 @@ public struct MenuModel: Equatable {
         return "tailmix: \(error!)"
     }
 
-    static func profileRow(_ profile: Profile, paused: Bool) -> ProfileRow {
-        let detail: String
+    static func profileRow(_ profile: Profile, paused: Bool, now: Date, locale: Locale, timeZone: TimeZone) -> ProfileRow {
+        var detail: String
         switch profile.runtimeState {
         case "disabled": detail = "Disconnected"
         case "down": detail = "Paused"
@@ -197,10 +231,14 @@ public struct MenuModel: Equatable {
         case "error": detail = "Error"
         default: detail = profile.runtimeState
         }
-        let loginURL = profile.runtimeState == "needs-login" && !profile.authURL.isEmpty ? URL(string: profile.authURL) : nil
+        if isExpiringSoon(profile, now: now), let expiry = profile.keyExpiry {
+            detail += " · key expires \(expiryWeekday(expiry, locale: locale, timeZone: timeZone))"
+        }
+        let needsLogin = profile.runtimeState == "needs-login"
+        let loginURL = needsLogin && !profile.authURL.isEmpty ? URL(string: profile.authURL) : nil
         return ProfileRow(
             name: profile.name, detail: detail, isOn: profile.enabled, isActionable: !paused,
-            loginURL: loginURL, errorMessage: profile.lastError.isEmpty ? nil : profile.lastError,
+            loginURL: loginURL, waitingForLogin: needsLogin && loginURL == nil, errorMessage: profile.lastError.isEmpty ? nil : profile.lastError,
             location: locationRow(profile))
     }
 

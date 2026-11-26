@@ -28,6 +28,26 @@ import Testing
         #expect(!bare.acceptAllDNSRoutes)
     }
 
+    @Test func testDecodesKeyExpiry() throws {
+        let status = try JSONDecoder().decode(Status.self, from: Data(Fixtures.keyStatus.utf8))
+        let home = status.profiles[0]
+        // Go encodes time.Time with fractional seconds when it has them.
+        let homeExpiry = try #require(home.keyExpiry)
+        #expect(abs(homeExpiry.timeIntervalSince1970 - 1_795_773_600.123) < 0.001)
+        #expect(!home.keyExpired)
+        let work = status.profiles[1]
+        #expect(work.keyExpiry == Date(timeIntervalSince1970: 1_795_181_400))
+        #expect(work.keyExpired)
+    }
+
+    @Test func testDecodesProfileWithoutKeyFields() throws {
+        let status = try JSONDecoder().decode(Status.self, from: Data(Fixtures.status.utf8))
+        #expect(status.profiles.allSatisfy { $0.keyExpiry == nil && !$0.keyExpired })
+        let bare = try JSONDecoder().decode(Profile.self, from: Data(#"{"name":"x"}"#.utf8))
+        #expect(bare.keyExpiry == nil)
+        #expect(!bare.keyExpired)
+    }
+
     @Test func testDecodesProfileLocation() throws {
         let status = try JSONDecoder().decode(Status.self, from: Data(Fixtures.locationStatus.utf8))
         let home = status.profiles[0]

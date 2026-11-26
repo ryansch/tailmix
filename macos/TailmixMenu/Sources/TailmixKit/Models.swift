@@ -43,12 +43,18 @@ public struct Profile: Equatable, Decodable {
     public var routesInEffect: Bool
     /// nil when location-aware routing is off or the daemon predates it.
     public var location: ProfileLocation?
+    /// When the node key expires; nil when it never does or the daemon
+    /// predates the field.
+    public var keyExpiry: Date?
+    /// Whether the profile needs sign-in because its node key expired.
+    public var keyExpired: Bool
 
     public init(id: String = "", name: String, kind: String = "tailscale", enabled: Bool,
                 runtimeState: String, backendState: String = "", selfDNSName: String = "",
                 peerCount: Int = 0, authURL: String = "", lastError: String = "",
                 acceptAllRoutes: Bool = false, acceptAllDNSRoutes: Bool = false,
-                routesInEffect: Bool = false, location: ProfileLocation? = nil) {
+                routesInEffect: Bool = false, location: ProfileLocation? = nil,
+                keyExpiry: Date? = nil, keyExpired: Bool = false) {
         self.id = id
         self.name = name
         self.kind = kind
@@ -63,6 +69,8 @@ public struct Profile: Equatable, Decodable {
         self.acceptAllDNSRoutes = acceptAllDNSRoutes
         self.routesInEffect = routesInEffect
         self.location = location
+        self.keyExpiry = keyExpiry
+        self.keyExpired = keyExpired
     }
 
     public init(from decoder: Decoder) throws {
@@ -81,15 +89,27 @@ public struct Profile: Equatable, Decodable {
         acceptAllDNSRoutes = try c.decodeIfPresent(Bool.self, forKey: .acceptAllDNSRoutes) ?? false
         routesInEffect = try c.decodeIfPresent(Bool.self, forKey: .routesInEffect) ?? false
         location = try c.decodeIfPresent(ProfileLocation.self, forKey: .location)
+        keyExpiry = try c.decodeIfPresent(String.self, forKey: .keyExpiry).flatMap(parseRFC3339)
+        keyExpired = try c.decodeIfPresent(Bool.self, forKey: .keyExpired) ?? false
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, name, kind, enabled, runtimeState, backendState, peerCount, lastError
-        case acceptAllRoutes, routesInEffect, location
+        case acceptAllRoutes, routesInEffect, location, keyExpiry, keyExpired
         case selfDNSName = "selfDnsName"
         case authURL = "authUrl"
         case acceptAllDNSRoutes = "acceptAllDnsRoutes"
     }
+}
+
+/// Parses an RFC 3339 timestamp as Go's encoding/json writes a time.Time,
+/// with or without fractional seconds. Returns nil for anything else.
+func parseRFC3339(_ text: String) -> Date? {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    if let date = formatter.date(from: text) { return date }
+    formatter.formatOptions = [.withInternetDateTime]
+    return formatter.date(from: text)
 }
 
 /// A profile's location-aware routing state.
