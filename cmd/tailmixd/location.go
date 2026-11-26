@@ -16,7 +16,7 @@ var _ controlapi.LocationBackend = (*supervisor)(nil)
 
 const (
 	defaultLocationPoll  = 5 * time.Second
-	defaultLocationGrace = 60 * time.Second
+	defaultLocationGrace = 10 * time.Second
 	minLocationGrace     = 10 * time.Second
 	maxLocationGrace     = 10 * time.Minute
 )
@@ -34,6 +34,19 @@ func (s *supervisor) gatewaySource() func() ([]string, error) {
 		return s.cfg.Gateways
 	}
 	return netlocation.Gateways
+}
+
+// networkChanges returns the source of network change notifications, or nil
+// when there is none.
+func (s *supervisor) networkChanges() func(notify func()) (func(), error) {
+	switch {
+	case s.cfg.NetworkChanges != nil:
+		return s.cfg.NetworkChanges
+	case s.cfg.Gateways == nil:
+		return netmonChanges
+	default:
+		return nil
+	}
 }
 
 func (s *supervisor) now() time.Time {
@@ -56,8 +69,9 @@ func (s *supervisor) locationSupported() bool {
 }
 
 // runLocationLoop polls the default gateways and applies the resulting
-// per-profile locations until ctx ends. It stops quietly on platforms without
-// detection.
+// per-profile locations until ctx ends. A host network change triggers a
+// lookup right away; polling remains as a fallback. It stops quietly on
+// platforms without detection.
 func (s *supervisor) runLocationLoop(ctx context.Context) {
 	if !s.locationSupported() {
 		return
@@ -69,6 +83,21 @@ func (s *supervisor) runLocationLoop(ctx context.Context) {
 	gateways := s.gatewaySource()
 	ticker := time.NewTicker(poll)
 	defer ticker.Stop()
+	// Changes that arrive during a lookup collapse into one more lookup.
+	changed := make(chan struct{}, 1)
+	if subscribe := s.networkChanges(); subscribe != nil {
+		stop, err := subscribe(func() {
+			select {
+			case changed <- struct{}{}:
+			default:
+			}
+		})
+		if err != nil {
+			fmt.Fprintln(s.cfg.Stderr, "network location: change notifications unavailable; polling only")
+		} else {
+			defer stop()
+		}
+	}
 	failing := false
 	for {
 		// Lookups happen without s.mu; observeLocation takes it.
@@ -96,6 +125,7 @@ func (s *supervisor) runLocationLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+		case <-changed:
 		}
 	}
 }

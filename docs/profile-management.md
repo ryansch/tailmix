@@ -420,7 +420,7 @@ Each opted-in profile has a location of `home`, `away`, or `unknown`:
 
 - Seeing one of the profile's home routers switches to `home` at once, and the
   profile's accept-all routes turn off.
-- Seeing only other routers switches to `away` after a grace period of 60
+- Seeing only other routers switches to `away` after a grace period of 10
   seconds, so brief roaming does not flap routes. Away, the configured
   accept-all settings apply. The tailmixd flag `-location-grace` sets the
   grace period, from `10s` to `10m` (for example `-location-grace=2m`).

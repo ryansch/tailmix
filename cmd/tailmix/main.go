@@ -2015,7 +2015,7 @@ Profile option: -p, --profile <profile>
 Location turns a profile's accept-all IP and DNS routes off while this Mac is on
 one of that profile's home networks and back on when it is away. A home network
 is identified by its router's hardware address. Leaving a home network switches
-to away after 60 seconds; losing the network keeps the current location.
+to away after 10 seconds; losing the network keeps the current location.
 Bindings are not affected. Location never turns on routes that accept-all has
 turned off.
 

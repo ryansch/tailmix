@@ -130,7 +130,7 @@ tailmix routes location override -p home on      # use the routes now anyway
 ```
 
 A home network is recognised by its router's hardware address. tailmix waits
-60 seconds before switching to away, and a network outage keeps the current
+10 seconds before switching to away, and a network outage keeps the current
 state. An override lasts until you next move between home and away. Pinned
 prefixes are not affected, and location never turns on routes that accept-all
 leaves off. See [Live Profile Management](docs/profile-management.md#location-aware-routes)

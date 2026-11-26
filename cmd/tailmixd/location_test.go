@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -261,9 +262,9 @@ func TestForgetCurrentWaitsForGrace(t *testing.T) {
 	if len(got.Location.HomeNetworks) != 0 || got.Location.OnHomeNetwork {
 		t.Fatalf("location after forget = %+v", got.Location)
 	}
-	observe(t, s, []string{gatewayA}, locationT0.Add(59*time.Second))
+	observe(t, s, []string{gatewayA}, locationT0.Add(defaultLocationGrace-time.Second))
 	wantLocation(t, getProfile(t, s, "home"), "home", false)
-	observe(t, s, []string{gatewayA}, locationT0.Add(60*time.Second))
+	observe(t, s, []string{gatewayA}, locationT0.Add(defaultLocationGrace))
 	wantLocation(t, getProfile(t, s, "home"), "away", true)
 }
 
@@ -349,6 +350,90 @@ func TestLocationLoopObservesGateways(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatal("location loop never moved the profile home")
+}
+
+func TestLocationLoopWakesOnNetworkChange(t *testing.T) {
+	configured := homeProfile()
+	configured.Location = &state.Location{Enabled: true, HomeGateways: []string{gatewayA}}
+	s, _ := newLocationTestSupervisor(t, configured)
+	s.clock = nil
+	// Only a network change can trigger the second lookup in time.
+	s.cfg.LocationPoll = time.Hour
+	var seen atomic.Pointer[[]string]
+	seen.Store(&[]string{})
+	s.cfg.Gateways = func() ([]string, error) { return *seen.Load(), nil }
+	notified := make(chan func(), 1)
+	stopped := make(chan struct{})
+	s.cfg.NetworkChanges = func(notify func()) (func(), error) {
+		notified <- notify
+		return func() { close(stopped) }, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		s.runLocationLoop(ctx)
+		close(done)
+	}()
+
+	var notify func()
+	select {
+	case notify = <-notified:
+	case <-time.After(5 * time.Second):
+		t.Fatal("location loop never subscribed to network changes")
+	}
+	seen.Store(&[]string{gatewayA})
+	// Several changes at once collapse into one lookup and must not block.
+	notify()
+	notify()
+	notify()
+	deadline := time.Now().Add(5 * time.Second)
+	for getProfile(t, s, "home").Location.Current != "home" {
+		if time.Now().After(deadline) {
+			t.Fatal("location loop did not look again after a network change")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	cancel()
+	<-done
+	select {
+	case <-stopped:
+	default:
+		t.Fatal("location loop did not stop its network change subscription")
+	}
+}
+
+func TestLocationLoopPollsWhenChangesUnavailable(t *testing.T) {
+	configured := homeProfile()
+	configured.Location = &state.Location{Enabled: true, HomeGateways: []string{gatewayA}}
+	s, _ := newLocationTestSupervisor(t, configured)
+	s.clock = nil
+	s.cfg.LocationPoll = time.Millisecond
+	var calls atomic.Int32
+	s.cfg.Gateways = func() ([]string, error) {
+		if calls.Add(1) == 1 {
+			return nil, nil
+		}
+		return []string{gatewayA}, nil
+	}
+	s.cfg.NetworkChanges = func(func()) (func(), error) { return nil, errors.New("no monitor") }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		s.runLocationLoop(ctx)
+		close(done)
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for getProfile(t, s, "home").Location.Current != "home" {
+		if time.Now().After(deadline) {
+			t.Fatal("location loop stopped polling without network change notifications")
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func TestObserveLocationAfterShutdownDoesNothing(t *testing.T) {

@@ -51,8 +51,13 @@ type daemonConfig struct {
 	Gateways func() ([]string, error)
 	// LocationPoll is how often gateways are polled; 0 means 5s.
 	LocationPoll time.Duration
+	// NetworkChanges subscribes notify to host network changes, so the
+	// location loop looks at the gateways right away instead of at the next
+	// poll. It returns a function that ends the subscription. Nil uses netmon
+	// when Gateways is also nil, and no subscription otherwise.
+	NetworkChanges func(notify func()) (stop func(), err error)
 	// LocationGrace is how long a profile must be off its home networks
-	// before it moves away; 0 means 60s.
+	// before it moves away; 0 means 10s.
 	LocationGrace time.Duration
 	// Interfaces lists host interfaces to detect another connected
 	// Tailscale client. Nil disables the check.

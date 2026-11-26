@@ -121,6 +121,18 @@ else
 	chmod 0644 "$plist"
 	if [ "$start_service" -eq 1 ]; then
 		launchctl bootout system/io.github.maisem.tailmixd 2>/dev/null || true
+		# bootout returns before the old tailmixd has exited. Bootstrapping
+		# while launchd is still removing the job fails with
+		# "Bootstrap failed: 5: Input/output error", so wait for it to go.
+		waited=0
+		while launchctl print system/io.github.maisem.tailmixd >/dev/null 2>&1; do
+			if [ "$waited" -ge 60 ]; then
+				echo "tailmixd did not stop within 30 seconds" >&2
+				exit 1
+			fi
+			sleep 0.5
+			waited=$((waited + 1))
+		done
 		launchctl bootstrap system "$plist"
 	fi
 fi
