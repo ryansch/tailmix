@@ -26,6 +26,7 @@ func Normalize(st *State) {
 			cfg := st.Profiles[i].WireGuard.Clone()
 			st.Profiles[i].WireGuard = &cfg
 		}
+		st.Profiles[i].Location = normalizeLocation(st.Profiles[i].Location.Clone())
 	}
 	sort.SliceStable(st.Profiles, func(i, j int) bool {
 		return st.Profiles[i].ID < st.Profiles[j].ID

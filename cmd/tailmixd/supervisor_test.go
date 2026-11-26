@@ -411,3 +411,25 @@ func TestSupervisorDNSReplacementDrainsAcrossMultipleUpdates(t *testing.T) {
 		t.Fatalf("drained reply = %+v", msg)
 	}
 }
+
+func TestCloneStateDeepCopiesLocation(t *testing.T) {
+	original := state.State{Profiles: []state.Profile{{
+		ID: "work",
+		Location: &state.Location{
+			Enabled:      true,
+			HomeGateways: []string{"aa:bb:cc:dd:ee:0f"},
+			Current:      state.LocationHome,
+		},
+	}}}
+	clone := cloneState(original)
+	clone.Profiles[0].Location.HomeGateways[0] = "11:22:33:44:55:66"
+	clone.Profiles[0].Location.HomeGateways = append(clone.Profiles[0].Location.HomeGateways, "22:33:44:55:66:77")
+	clone.Profiles[0].Location.Current = state.LocationAway
+	got := original.Profiles[0].Location
+	if len(got.HomeGateways) != 1 || got.HomeGateways[0] != "aa:bb:cc:dd:ee:0f" {
+		t.Fatalf("original HomeGateways changed: %q", got.HomeGateways)
+	}
+	if got.Current != state.LocationHome {
+		t.Fatalf("original Current changed: %q", got.Current)
+	}
+}

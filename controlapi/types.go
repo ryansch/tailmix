@@ -25,8 +25,8 @@ type UpdateStatus struct {
 }
 
 // Operator describes the non-root local user allowed to connect and
-// disconnect profiles and select the exit node. UID is empty when no operator
-// is configured.
+// disconnect profiles, select the exit node, and manage profile location
+// (see OperatorRoutes). UID is empty when no operator is configured.
 type Operator struct {
 	UID      string `json:"uid,omitempty"`
 	Username string `json:"username,omitempty"`
@@ -61,6 +61,8 @@ type Profile struct {
 	Removed                bool                    `json:"removed"`
 	AcceptAllRoutes        bool                    `json:"acceptAllRoutes"`
 	AcceptAllDNSRoutes     bool                    `json:"acceptAllDnsRoutes"`
+	RoutesInEffect         bool                    `json:"routesInEffect"`     // effective IP || DNS accept-all
+	Location               *ProfileLocation        `json:"location,omitempty"` // set only when Enabled
 	RuntimeState           string                  `json:"runtimeState"`
 	BackendState           string                  `json:"backendState,omitempty"`
 	MagicDNSSuffix         string                  `json:"magicDnsSuffix,omitempty"`
@@ -74,6 +76,30 @@ type Profile struct {
 	AvailableDNSRoutes     []AvailableDNSRoute     `json:"availableDnsRoutes,omitempty"`
 	AvailableSearchDomains []AvailableSearchDomain `json:"availableSearchDomains,omitempty"`
 	LastError              string                  `json:"lastError,omitempty"`
+}
+
+// ProfileLocation reports a profile's location-aware routing: whether the
+// daemon can detect the network, whether the profile opted in, the current
+// location and any manual override.
+type ProfileLocation struct {
+	Supported        bool     `json:"supported"`
+	Enabled          bool     `json:"enabled"`
+	Current          string   `json:"current"`            // "home" | "away" | "unknown"
+	Override         string   `json:"override,omitempty"` // "on" | "off"
+	HomeNetworks     []string `json:"homeNetworks,omitempty"`
+	NetworkAvailable bool     `json:"networkAvailable"` // a gateway is seen now
+	OnHomeNetwork    bool     `json:"onHomeNetwork"`    // a seen gateway is in HomeNetworks
+}
+
+// SetLocationRequest turns location-aware routing on or off for a profile.
+type SetLocationRequest struct {
+	Enabled bool `json:"enabled"`
+}
+
+// SetLocationOverrideRequest forces a profile's routes "on" or "off"
+// regardless of its location.
+type SetLocationOverrideRequest struct {
+	Routes string `json:"routes"`
 }
 
 // ApplyWireGuardRequest is the transient local-control request used to apply a

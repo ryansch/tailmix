@@ -254,3 +254,35 @@ func profilePath(name string) string {
 func wireGuardProfilePath(name string) string {
 	return "/v1/wireguard/by-name/" + url.PathEscape(name)
 }
+
+func (c *Client) SetProfileLocation(ctx context.Context, name string, request SetLocationRequest) (Profile, error) {
+	var out Profile
+	err := c.do(ctx, http.MethodPut, profilePath(name)+"/location", request, &out)
+	return out, err
+}
+
+func (c *Client) MarkCurrentNetworkHome(ctx context.Context, name string) (Profile, error) {
+	var out Profile
+	err := c.do(ctx, http.MethodPost, profilePath(name)+"/location/home-networks/current", nil, &out)
+	return out, err
+}
+
+// ForgetHomeNetwork removes gateway from the profile's home networks; gateway
+// "current" removes every gateway seen now.
+func (c *Client) ForgetHomeNetwork(ctx context.Context, name, gateway string) (Profile, error) {
+	var out Profile
+	err := c.do(ctx, http.MethodDelete, profilePath(name)+"/location/home-networks/"+url.PathEscape(gateway), nil, &out)
+	return out, err
+}
+
+func (c *Client) SetLocationOverride(ctx context.Context, name string, request SetLocationOverrideRequest) (Profile, error) {
+	var out Profile
+	err := c.do(ctx, http.MethodPut, profilePath(name)+"/location/override", request, &out)
+	return out, err
+}
+
+func (c *Client) ClearLocationOverride(ctx context.Context, name string) (Profile, error) {
+	var out Profile
+	err := c.do(ctx, http.MethodDelete, profilePath(name)+"/location/override", nil, &out)
+	return out, err
+}

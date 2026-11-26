@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/netip"
 	"os"
@@ -45,6 +46,7 @@ type fakeManagementClient struct {
 	operator         controlapi.Operator
 	operatorSet      string
 	operatorCleared  bool
+	locationCalls    []string
 }
 
 func (f *fakeManagementClient) Operator(context.Context) (controlapi.Operator, error) {
@@ -153,6 +155,27 @@ func (f *fakeManagementClient) SetWireGuardShieldsUp(_ context.Context, name str
 	f.wireGuardShields = enabled
 	f.wireGuardProfile.ShieldsUp = enabled
 	return f.wireGuardProfile, nil
+}
+
+func (f *fakeManagementClient) SetProfileLocation(_ context.Context, name string, request controlapi.SetLocationRequest) (controlapi.Profile, error) {
+	f.locationCalls = append(f.locationCalls, fmt.Sprintf("set %s enabled=%t", name, request.Enabled))
+	return f.profile, nil
+}
+func (f *fakeManagementClient) MarkCurrentNetworkHome(_ context.Context, name string) (controlapi.Profile, error) {
+	f.locationCalls = append(f.locationCalls, "mark-home "+name)
+	return f.profile, nil
+}
+func (f *fakeManagementClient) ForgetHomeNetwork(_ context.Context, name, gateway string) (controlapi.Profile, error) {
+	f.locationCalls = append(f.locationCalls, "forget "+name+" "+gateway)
+	return f.profile, nil
+}
+func (f *fakeManagementClient) SetLocationOverride(_ context.Context, name string, request controlapi.SetLocationOverrideRequest) (controlapi.Profile, error) {
+	f.locationCalls = append(f.locationCalls, "override "+name+" "+request.Routes)
+	return f.profile, nil
+}
+func (f *fakeManagementClient) ClearLocationOverride(_ context.Context, name string) (controlapi.Profile, error) {
+	f.locationCalls = append(f.locationCalls, "clear-override "+name)
+	return f.profile, nil
 }
 
 func testDependencies(client managementClient, stdout, stderr io.Writer, runner cliRunner) dependencies {
@@ -689,6 +712,8 @@ func TestCompletionSuggestsCommandsFlagsAndValues(t *testing.T) {
 		{name: "profile flag value", words: []string{"routes", "bind", "--profile", "w"}, want: []string{"work\tdisabled"}},
 		{name: "profile operand", words: []string{"profiles", "show", "h"}, want: []string{"home\trunning"}},
 		{name: "boolean flag value", words: []string{"routes", "set", "--accept-all="}, want: []string{"false\t", "true\t"}},
+		{name: "routes location subcommands", words: []string{"routes", "location", ""}, want: []string{"show\t", "enable\t", "disable\t", "mark-home\t", "forget\t", "override\t"}},
+		{name: "routes location override value", words: []string{"routes", "location", "override", "-p", "home", ""}, want: []string{"on\t", "off\t", "clear\t"}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -1315,5 +1340,233 @@ func TestTSWithoutProfile(t *testing.T) {
 				t.Errorf("stderr = %q, want %q", stderr.String(), tt.wantStderr)
 			}
 		})
+	}
+}
+
+func TestRoutesLocationCommands(t *testing.T) {
+	homeProfile := controlapi.Profile{
+		Name: "home", AcceptAllRoutes: true, AcceptAllDNSRoutes: true, RoutesInEffect: false,
+		Location: &controlapi.ProfileLocation{
+			Supported: true, Enabled: true, Current: "home",
+			HomeNetworks: []string{"aa:bb:cc:dd:ee:ff"}, NetworkAvailable: true, OnHomeNetwork: true,
+		},
+	}
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "enable", args: []string{"enable", "--profile", "home"}, want: "set home enabled=true"},
+		{name: "disable", args: []string{"disable", "-p", "home"}, want: "set home enabled=false"},
+		{name: "mark-home", args: []string{"mark-home", "--profile", "home"}, want: "mark-home home"},
+		{name: "forget current", args: []string{"forget", "--profile", "home"}, want: "forget home current"},
+		{name: "forget gateway", args: []string{"forget", "--profile", "home", "aa:bb:cc:dd:ee:ff"}, want: "forget home aa:bb:cc:dd:ee:ff"},
+		{name: "override on", args: []string{"override", "--profile", "home", "on"}, want: "override home on"},
+		{name: "override off", args: []string{"override", "--profile", "home", "off"}, want: "override home off"},
+		{name: "override clear", args: []string{"override", "--profile", "home", "clear"}, want: "clear-override home"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := &fakeManagementClient{profile: homeProfile}
+			var stdout, stderr bytes.Buffer
+			code := runWithDependencies(context.Background(), append([]string{"routes", "location"}, test.args...),
+				testDependencies(client, &stdout, &stderr, nil))
+			if code != 0 || stderr.Len() != 0 {
+				t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+			}
+			if !slices.Equal(client.locationCalls, []string{test.want}) {
+				t.Fatalf("calls = %q, want %q", client.locationCalls, test.want)
+			}
+			if !strings.Contains(stdout.String(), "home") {
+				t.Fatalf("stdout = %q", stdout.String())
+			}
+		})
+	}
+
+	t.Run("json", func(t *testing.T) {
+		client := &fakeManagementClient{profile: homeProfile}
+		var stdout bytes.Buffer
+		code := runWithDependencies(context.Background(), []string{"routes", "location", "mark-home", "-p", "home", "--json"},
+			testDependencies(client, &stdout, io.Discard, nil))
+		var got controlapi.Profile
+		if err := json.Unmarshal(stdout.Bytes(), &got); code != 0 || err != nil || got.Location == nil || got.Location.Current != "home" {
+			t.Fatalf("code = %d, err = %v, stdout = %q", code, err, stdout.String())
+		}
+	})
+
+	for _, test := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "override unknown value", args: []string{"override", "-p", "home", "maybe"}, want: "on, off, or clear"},
+		{name: "override missing value", args: []string{"override", "-p", "home"}, want: "on, off, or clear"},
+		{name: "enable without profile", args: []string{"enable"}, want: "--profile"},
+		{name: "mark-home extra operand", args: []string{"mark-home", "-p", "home", "x"}, want: "unexpected arguments"},
+		{name: "forget two gateways", args: []string{"forget", "-p", "home", "a", "b"}, want: "forget"},
+		{name: "unknown subcommand", args: []string{"toggle"}, want: "unknown routes location command"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client := &fakeManagementClient{profile: homeProfile}
+			var stderr bytes.Buffer
+			code := runWithDependencies(context.Background(), append([]string{"routes", "location"}, test.args...),
+				testDependencies(client, io.Discard, &stderr, nil))
+			if code != 2 || len(client.locationCalls) != 0 || !strings.Contains(stderr.String(), test.want) {
+				t.Fatalf("code = %d, calls = %q, stderr = %q", code, client.locationCalls, stderr.String())
+			}
+		})
+	}
+}
+
+func TestRoutesLocationEnableWarnsWhenAcceptAllIsOff(t *testing.T) {
+	const warning = "routes will stay off everywhere because accept-all is off for this profile"
+	for _, test := range []struct {
+		name    string
+		profile controlapi.Profile
+		warn    bool
+	}{
+		{name: "both off", profile: controlapi.Profile{Name: "home"}, warn: true},
+		{name: "dns on", profile: controlapi.Profile{Name: "home", AcceptAllDNSRoutes: true}, warn: false},
+		{name: "ip on", profile: controlapi.Profile{Name: "home", AcceptAllRoutes: true}, warn: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			test.profile.Location = &controlapi.ProfileLocation{Supported: true, Enabled: true, Current: "unknown"}
+			client := &fakeManagementClient{profile: test.profile}
+			var stdout, stderr bytes.Buffer
+			code := runWithDependencies(context.Background(), []string{"routes", "location", "enable", "-p", "home"},
+				testDependencies(client, &stdout, &stderr, nil))
+			if code != 0 {
+				t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+			}
+			if got := strings.Contains(stdout.String()+stderr.String(), warning); got != test.warn {
+				t.Fatalf("warned = %t, want %t; stdout = %q, stderr = %q", got, test.warn, stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
+func TestRoutesLocationShow(t *testing.T) {
+	home := controlapi.Profile{
+		Name: "home", AcceptAllRoutes: true, RoutesInEffect: false,
+		Location: &controlapi.ProfileLocation{
+			Supported: true, Enabled: true, Current: "home", Override: "on",
+			HomeNetworks: []string{"aa:bb:cc:dd:ee:ff"}, NetworkAvailable: true, OnHomeNetwork: true,
+		},
+	}
+	work := controlapi.Profile{Name: "work", AcceptAllRoutes: true, RoutesInEffect: true}
+
+	t.Run("one profile", func(t *testing.T) {
+		client := &fakeManagementClient{profile: home}
+		var stdout, stderr bytes.Buffer
+		code := runWithDependencies(context.Background(), []string{"routes", "location", "show", "-p", "home"},
+			testDependencies(client, &stdout, &stderr, nil))
+		if code != 0 || client.profileName != "home" {
+			t.Fatalf("code = %d, profile = %q, stderr = %q", code, client.profileName, stderr.String())
+		}
+		for _, want := range []string{"home", "aa:bb:cc:dd:ee:ff", "on"} {
+			if !strings.Contains(stdout.String(), want) {
+				t.Errorf("show does not contain %q:\n%s", want, stdout.String())
+			}
+		}
+	})
+	t.Run("all profiles", func(t *testing.T) {
+		client := &fakeManagementClient{statusProfiles: []controlapi.Profile{home, work}}
+		var stdout, stderr bytes.Buffer
+		code := runWithDependencies(context.Background(), []string{"routes", "location", "show"},
+			testDependencies(client, &stdout, &stderr, nil))
+		if code != 0 {
+			t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+		}
+		for _, want := range []string{"PROFILE", "LOCATION", "home (override on)", "work"} {
+			if !strings.Contains(stdout.String(), want) {
+				t.Errorf("show does not contain %q:\n%s", want, stdout.String())
+			}
+		}
+	})
+	t.Run("json", func(t *testing.T) {
+		client := &fakeManagementClient{profile: home}
+		var stdout bytes.Buffer
+		code := runWithDependencies(context.Background(), []string{"routes", "location", "show", "-p", "home", "--json"},
+			testDependencies(client, &stdout, io.Discard, nil))
+		var got controlapi.Profile
+		if err := json.Unmarshal(stdout.Bytes(), &got); code != 0 || err != nil || got.Location == nil || got.Location.Override != "on" {
+			t.Fatalf("code = %d, err = %v, stdout = %q", code, err, stdout.String())
+		}
+	})
+}
+
+func TestRoutesLocationHelpListsSubcommands(t *testing.T) {
+	for _, args := range [][]string{{"routes", "location", "help"}, {"routes", "location"}} {
+		var stdout bytes.Buffer
+		code := runWithDependencies(context.Background(), args,
+			testDependencies(&fakeManagementClient{}, &stdout, io.Discard, nil))
+		if code != 0 {
+			t.Fatalf("%q: code = %d", args, code)
+		}
+		for _, want := range []string{"show", "enable", "disable", "mark-home", "forget", "override"} {
+			if !strings.Contains(stdout.String(), "tailmix routes location "+want) {
+				t.Errorf("%q help does not list %q:\n%s", args, want, stdout.String())
+			}
+		}
+	}
+	var stdout bytes.Buffer
+	runWithDependencies(context.Background(), []string{"routes", "help"},
+		testDependencies(&fakeManagementClient{}, &stdout, io.Discard, nil))
+	if !strings.Contains(stdout.String(), "tailmix routes location") {
+		t.Errorf("routes help does not mention location:\n%s", stdout.String())
+	}
+}
+
+func TestStatusShowsProfileLocation(t *testing.T) {
+	client := &fakeManagementClient{status: controlapi.Status{
+		State: "up",
+		Profiles: []controlapi.Profile{
+			{Name: "home", Location: &controlapi.ProfileLocation{Enabled: true, Current: "home"}},
+			{Name: "laptop", Location: &controlapi.ProfileLocation{Enabled: true, Current: "away", Override: "off"}},
+			{Name: "lab", RoutesInEffect: true, Location: &controlapi.ProfileLocation{Enabled: true, Current: "unknown"}},
+			{Name: "desk", RoutesInEffect: true, Location: &controlapi.ProfileLocation{Enabled: true, Current: "home", Override: "on"}},
+			{Name: "work"},
+		},
+	}}
+	var stdout bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{"status"},
+		testDependencies(client, &stdout, io.Discard, nil))
+	if code != 0 {
+		t.Fatalf("code = %d", code)
+	}
+	lines := strings.Split(stdout.String(), "\n")
+	start := strings.Index(lines[2], "LOCATION")
+	if start < 0 {
+		t.Fatalf("no LOCATION column:\n%s", stdout.String())
+	}
+	column := func(line string) string {
+		value := strings.TrimSpace(line[start:])
+		if end := strings.Index(value, "  "); end >= 0 {
+			value = value[:end]
+		}
+		return value
+	}
+	want := map[string]string{
+		"home":   "home, routes off",
+		"laptop": "away, routes off (override off)",
+		"lab":    "unknown, routes on",
+		"desk":   "home, routes on (override on)",
+		"work":   "-",
+	}
+	for _, line := range lines[3:8] {
+		name := strings.Fields(line)[0]
+		if got := column(line); got != want[name] {
+			t.Errorf("%s LOCATION = %q, want %q\n%s", name, got, want[name], stdout.String())
+		}
+	}
+}
+
+func TestProfilesListOmitsLocation(t *testing.T) {
+	client := &fakeManagementClient{statusProfiles: []controlapi.Profile{{Name: "work"}}}
+	var stdout bytes.Buffer
+	runWithDependencies(context.Background(), []string{"profiles", "list"},
+		testDependencies(client, &stdout, io.Discard, nil))
+	if strings.Contains(stdout.String(), "LOCATION") {
+		t.Fatalf("profiles list shows LOCATION:\n%s", stdout.String())
 	}
 }

@@ -103,6 +103,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	logUploadURL := fs.String("log-upload-url", "", "replace the remote logtail upload base URL (requires -log-upload)")
 	updateRoot := fs.String("update-root", installedUpdateRoot(os.Args[0]), "root of a direct installation eligible for automatic updates")
 	autoUpdate := fs.Bool("auto-update", true, "automatically install stable tailmix updates")
+	locationGrace := fs.Duration("location-grace", defaultLocationGrace, "how long a profile must be off its home networks before its routes turn on (10s to 10m)")
 	showVersion := fs.Bool("version", false, "print version and exit")
 	registerProfileFlags(fs, &profiles)
 	if err := fs.Parse(args); err != nil {
@@ -129,6 +130,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	}
 	if *mode == "socks" && *socksAddr == "" {
 		return fmt.Errorf("socks listen address is required")
+	}
+	if err := validateLocationGrace(*locationGrace); err != nil {
+		return err
 	}
 	if fs.NArg() != 0 {
 		return fmt.Errorf("unexpected positional arguments: %s", strings.Join(fs.Args(), " "))
@@ -165,18 +169,19 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		updater = tailmixupdate.Client{Root: *updateRoot}
 	}
 	supervisor := newSupervisor(store, st, runtimeProfiles, daemonConfig{
-		Mode:         *mode,
-		TUNName:      *tunName,
-		SocketDir:    *socketDir,
-		SOCKSAddr:    *socksAddr,
-		Verbose:      *verbose,
-		LogUpload:    *logUpload,
-		LogUploadURL: *logUploadURL,
-		Stderr:       stderr,
-		Updater:      updater,
-		Version:      tailmixversion.GetMeta().Short,
-		UpdateRoot:   *updateRoot,
-		UpdateDelay:  defaultUpdateDelay,
+		Mode:          *mode,
+		TUNName:       *tunName,
+		SocketDir:     *socketDir,
+		SOCKSAddr:     *socksAddr,
+		Verbose:       *verbose,
+		LogUpload:     *logUpload,
+		LogUploadURL:  *logUploadURL,
+		Stderr:        stderr,
+		Updater:       updater,
+		Version:       tailmixversion.GetMeta().Short,
+		UpdateRoot:    *updateRoot,
+		UpdateDelay:   defaultUpdateDelay,
+		LocationGrace: *locationGrace,
 	})
 	err = supervisor.Run(ctx)
 	var restart *updateRestart

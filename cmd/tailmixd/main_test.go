@@ -6,7 +6,9 @@ import (
 	"flag"
 	"net/netip"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	tailmixdns "github.com/maisem/tailmix/dns"
 	"github.com/maisem/tailmix/effectiveip"
@@ -29,6 +31,40 @@ func TestVersion(t *testing.T) {
 	}
 	if got := stderr.String(); got != "" {
 		t.Fatalf("version stderr = %q, want empty", got)
+	}
+}
+
+func TestValidateLocationGrace(t *testing.T) {
+	for _, tc := range []struct {
+		grace time.Duration
+		ok    bool
+	}{
+		{defaultLocationGrace, true},
+		{10 * time.Second, true},
+		{10 * time.Minute, true},
+		{9 * time.Second, false},
+		{0, false},
+		{-time.Minute, false},
+		{10*time.Minute + time.Second, false},
+	} {
+		err := validateLocationGrace(tc.grace)
+		if (err == nil) != tc.ok {
+			t.Errorf("validateLocationGrace(%v) = %v, want ok %v", tc.grace, err, tc.ok)
+		}
+	}
+}
+
+func TestRunRejectsOutOfRangeLocationGrace(t *testing.T) {
+	for _, value := range []string{"5s", "11m", "soon"} {
+		statePath := filepath.Join(t.TempDir(), "state.json")
+		var stdout, stderr bytes.Buffer
+		err := run(context.Background(), []string{"-state", statePath, "-location-grace", value}, &stdout, &stderr)
+		if err == nil {
+			t.Fatalf("-location-grace %s: run() succeeded, want an error", value)
+		}
+		if !strings.Contains(err.Error()+stderr.String(), "location-grace") {
+			t.Errorf("-location-grace %s: error %q (stderr %q) does not name the flag", value, err, stderr.String())
+		}
 	}
 }
 

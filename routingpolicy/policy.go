@@ -110,7 +110,7 @@ func BuildIP(st state.State, statuses []profile.Status) IPPlan {
 
 	importCandidates := map[netip.Prefix][]IPEntry{}
 	for _, configured := range st.Profiles {
-		if !configured.AcceptAllRoutes {
+		if !configured.EffectiveAcceptAllRoutes() {
 			continue
 		}
 		accept := controlapi.AcceptAllProfile{
@@ -249,7 +249,7 @@ func BuildDNS(st state.State, statuses []profile.Status) DNSPlan {
 
 	importCandidates := map[string][]DNSEntry{}
 	for _, configured := range st.Profiles {
-		if !configured.AcceptAllDNSRoutes {
+		if !configured.EffectiveAcceptAllDNSRoutes() {
 			continue
 		}
 		accept := controlapi.AcceptAllProfile{

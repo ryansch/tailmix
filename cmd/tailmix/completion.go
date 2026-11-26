@@ -19,6 +19,7 @@ const (
 	completionProfile
 	completionBoolean
 	completionOnOff
+	completionLocationOverride
 	completionFile
 	completionDirectory
 )
@@ -297,6 +298,14 @@ func completeValue(ctx context.Context, socketDir string, kind completionValueKi
 			}
 		}
 		return candidates, cobra.ShellCompDirectiveNoFileComp
+	case completionLocationOverride:
+		var candidates []completionCandidate
+		for _, value := range []string{"clear", "off", "on"} {
+			if strings.HasPrefix(value, prefix) {
+				candidates = append(candidates, completionCandidate{value, "location override"})
+			}
+		}
+		return candidates, cobra.ShellCompDirectiveNoFileComp
 	case completionFile:
 		return nil, cobra.ShellCompDirectiveDefault
 	case completionDirectory:
@@ -376,6 +385,17 @@ func completionCommandTree() *completionCommand {
 			{name: "bind", description: "Bind prefixes to a profile", flags: []completionFlag{profileFlag(), flag("Replace conflicting bindings", completionNoValue, "--replace"), jsonFlag()}, variadic: completionFreeValue},
 			{name: "unbind", description: "Remove prefix bindings", flags: []completionFlag{profileFlag(), jsonFlag()}, variadic: completionFreeValue},
 			leaf("set", "Set profile-wide IP route policy", []completionFlag{profileFlag(), flag("Accept every advertised route", completionBoolean, "--accept-all"), jsonFlag()}),
+			{
+				name: "location", description: "Turn accept-all routes off on home networks", help: true,
+				subcommands: []*completionCommand{
+					leaf("show", "Show location and home networks", []completionFlag{profileFlag(), jsonFlag()}),
+					leaf("enable", "Turn location on for a profile", []completionFlag{profileFlag(), jsonFlag()}),
+					leaf("disable", "Turn location off for a profile", []completionFlag{profileFlag(), jsonFlag()}),
+					leaf("mark-home", "Record the current network as home", []completionFlag{profileFlag(), jsonFlag()}),
+					leaf("forget", "Forget the current or a named home network", []completionFlag{profileFlag(), jsonFlag()}, completionFreeValue),
+					leaf("override", "Force routes on or off, or clear the override", []completionFlag{profileFlag(), jsonFlag()}, completionLocationOverride),
+				},
+			},
 		},
 	}
 

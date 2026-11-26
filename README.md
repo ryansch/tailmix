@@ -108,6 +108,28 @@ sudo tailmix dns search add corp.example.com
 sudo tailmix dns routes set -p work --accept-all=true   # or accept all of work's DNS routes
 ```
 
+## Routes at home (macOS)
+
+If a tailnet's subnet routes cover your home network, you only need them away
+from home. Location turns a profile's accept-all IP and DNS routes off while
+your Mac is on one of that profile's home networks and back on when it leaves.
+Opting a profile in or out (`enable`, `disable`) needs `sudo`. The
+[operator](#menu-bar-app-macos) can mark home, override, and show without it:
+
+```sh
+sudo tailmix routes location enable -p home      # opt the profile in
+tailmix routes location mark-home -p home        # while connected at home
+tailmix routes location show                     # home, away, or unknown
+tailmix routes location override -p home on      # use the routes now anyway
+```
+
+A home network is recognised by its router's hardware address. tailmix waits
+60 seconds before switching to away, and a network outage keeps the current
+state. An override lasts until you next move between home and away. Pinned
+prefixes are not affected, and location never turns on routes that accept-all
+leaves off. See [Live Profile Management](docs/profile-management.md#location-aware-routes)
+for details.
+
 ## Overlapping addresses
 
 Two tailnets can use the same `100.x` address. tailmix gives every node and
@@ -144,8 +166,9 @@ operator:
 sudo tailmix operator set    # the user who ran sudo
 ```
 
-The operator may only connect and disconnect profiles and select or clear the
-exit node. Every other change still requires root.
+The operator may only connect and disconnect profiles, select or clear the
+exit node, and mark, forget, or override home networks for profiles that use
+location. Every other change still requires root.
 
 ## Updates
 

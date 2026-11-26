@@ -21,6 +21,7 @@ import (
 	tailmixdns "github.com/maisem/tailmix/dns"
 	"github.com/maisem/tailmix/effectiveip"
 	"github.com/maisem/tailmix/hosttun"
+	"github.com/maisem/tailmix/netlocation"
 	"github.com/maisem/tailmix/packetmap"
 	tailmixprofile "github.com/maisem/tailmix/profile"
 	"github.com/maisem/tailmix/profilesocket"
@@ -45,6 +46,14 @@ type daemonConfig struct {
 	Version      string
 	UpdateRoot   string
 	UpdateDelay  func(bool) time.Duration
+	// Gateways reports the default gateways seen now; nil uses
+	// netlocation.Gateways.
+	Gateways func() ([]string, error)
+	// LocationPoll is how often gateways are polled; 0 means 5s.
+	LocationPoll time.Duration
+	// LocationGrace is how long a profile must be off its home networks
+	// before it moves away; 0 means 60s.
+	LocationGrace time.Duration
 }
 
 type managedProfile struct {
@@ -91,6 +100,13 @@ type supervisor struct {
 	updateRestart chan updateRestart
 	operator      atomic.Value // string; see operatorUID
 
+	// Network location; see location.go. seenGateways is guarded by mu.
+	locationTracker     *netlocation.Tracker
+	seenGateways        []string
+	locationProbe       sync.Once
+	locationUnsupported atomic.Bool
+	clock               func() time.Time // nil means time.Now
+
 	leaseActivity effectiveip.ActivityTracker
 }
 
@@ -114,6 +130,11 @@ func newSupervisor(store *state.JSONStore, st state.State, initial []runtimeProf
 		updateWake:    make(chan struct{}, 1),
 		updateRestart: make(chan updateRestart, 1),
 	}
+	grace := cfg.LocationGrace
+	if grace <= 0 {
+		grace = defaultLocationGrace
+	}
+	s.locationTracker = netlocation.NewTracker(grace)
 	s.leaseActivity.SetLeases(leasesFromState(st.Leases))
 	s.operator.Store(st.OperatorUID)
 	return s
@@ -158,6 +179,7 @@ func (s *supervisor) Run(ctx context.Context) (retErr error) {
 	if s.cfg.Updater != nil {
 		go s.runUpdateLoop(s.ctx)
 	}
+	go s.runLocationLoop(s.ctx)
 
 	defer func() {
 		retErr = errors.Join(retErr, s.close())
@@ -793,6 +815,7 @@ func cloneState(st state.State) state.State {
 			cfg := st.Profiles[i].WireGuard.Clone()
 			st.Profiles[i].WireGuard = &cfg
 		}
+		st.Profiles[i].Location = st.Profiles[i].Location.Clone()
 	}
 	st.Leases = append([]state.EffectiveLease(nil), st.Leases...)
 	st.IPRouteBindings = append([]state.IPRouteBinding(nil), st.IPRouteBindings...)
@@ -855,6 +878,8 @@ func (s *supervisor) projectProfileLocked(configured state.Profile) controlapi.P
 		Removed:            configured.Removed,
 		AcceptAllRoutes:    configured.AcceptAllRoutes,
 		AcceptAllDNSRoutes: configured.AcceptAllDNSRoutes,
+		RoutesInEffect:     routesInEffect(configured),
+		Location:           s.projectLocationLocked(configured.Location),
 		ShieldsUp:          configured.Kind == state.ProfileKindWireGuard && configured.WireGuardShieldsUp,
 		LastError:          s.lastErrors[configured.ID],
 	}
@@ -1195,6 +1220,7 @@ func (s *supervisor) RemoveProfile(_ context.Context, name string, purge bool) (
 	configured.Removed = true
 	configured.Disabled = true
 	configured.WireGuardShieldsUp = false
+	s.locationTracker.Forget(configured.ID)
 	if s.st.ExitNode != nil && s.st.ExitNode.ProfileID == configured.ID {
 		s.st.ExitNode = nil
 	}

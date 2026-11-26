@@ -2,6 +2,7 @@ package routingpolicy
 
 import (
 	"net/netip"
+	"reflect"
 	"testing"
 
 	"github.com/maisem/tailmix/profile"
@@ -252,5 +253,96 @@ func TestBuildDNSListsDetectedSearchDomainsByProfile(t *testing.T) {
 	}
 	if got := plan.Search.Available[1]; got.Domain != "lab.example" || got.ProfileName != "lab" {
 		t.Fatalf("second available search domain = %+v", got)
+	}
+}
+
+func TestBuildIPLocationHomeSuppressesImports(t *testing.T) {
+	build := func(loc *state.Location) IPPlan {
+		st := state.State{
+			Profiles: []state.Profile{
+				{ID: "work-id", Name: "work", AcceptAllRoutes: true, Location: loc},
+				{ID: "lab-id", Name: "lab"},
+			},
+			IPRouteBindings: []state.IPRouteBinding{
+				{Prefix: netip.MustParsePrefix("10.20.0.0/16"), ProfileID: "lab-id"},
+				{Prefix: netip.MustParsePrefix("10.30.0.0/16"), ProfileID: "work-id"},
+			},
+		}
+		return BuildIP(st, []profile.Status{
+			{ProfileID: "work-id", AvailableRoutes: []profile.RouteStatus{
+				{Prefix: netip.MustParsePrefix("10.20.0.0/16"), PrimaryRouter: "work-router"},
+				{Prefix: netip.MustParsePrefix("10.30.0.0/16"), PrimaryRouter: "work-router"},
+			}},
+			{ProfileID: "lab-id", AvailableRoutes: []profile.RouteStatus{{
+				Prefix: netip.MustParsePrefix("10.0.0.0/8"), PrimaryRouter: "lab-router",
+			}}},
+		})
+	}
+
+	home := build(&state.Location{Enabled: true, Current: state.LocationHome})
+	if len(home.Imported) != 0 || len(home.Resource.Imported) != 0 {
+		t.Fatalf("imported at home = %+v / %+v", home.Imported, home.Resource.Imported)
+	}
+	for _, accept := range home.Resource.AcceptAllProfiles {
+		if accept.ProfileID == "work-id" {
+			t.Fatalf("accept-all profile listed at home: %+v", accept)
+		}
+	}
+	var bound bool
+	for _, entry := range home.Exact {
+		if entry.Prefix == netip.MustParsePrefix("10.30.0.0/16") {
+			bound = entry.Active && entry.ProfileID == "work-id"
+		}
+	}
+	if !bound {
+		t.Fatalf("explicit binding for suppressed profile not active: %+v", home.Exact)
+	}
+
+	away := build(&state.Location{Enabled: true, Current: state.LocationAway})
+	if want := build(nil); !reflect.DeepEqual(away, want) {
+		t.Fatalf("away plan = %+v, want %+v", away, want)
+	}
+	if len(away.Imported) == 0 || len(away.Resource.AcceptAllProfiles) != 1 {
+		t.Fatalf("away plan missing accept-all imports: %+v", away)
+	}
+}
+
+func TestBuildDNSLocationHomeSuppressesImports(t *testing.T) {
+	build := func(loc *state.Location) DNSPlan {
+		st := state.State{
+			Profiles: []state.Profile{
+				{ID: "work-id", Name: "work", AcceptAllDNSRoutes: true, Location: loc},
+				{ID: "lab-id", Name: "lab"},
+			},
+			DNSRouteBindings: []state.DNSRouteBinding{
+				{Domain: "DEV.Corp.Example.", ProfileID: "lab-id"},
+			},
+		}
+		return BuildDNS(st, []profile.Status{
+			{ProfileID: "work-id", MagicDNSSuffix: "corp.example", DNSRoutes: []profile.DNSRouteStatus{{
+				Domain: "corp.example", Source: "magicdns",
+			}}},
+			{ProfileID: "lab-id", DNSRoutes: []profile.DNSRouteStatus{{
+				Domain: "corp.example", Source: "split-dns",
+			}}},
+		})
+	}
+
+	home := build(&state.Location{Enabled: true, Current: state.LocationHome})
+	if len(home.Imported) != 0 || len(home.Resource.Imported) != 0 {
+		t.Fatalf("imported at home = %+v / %+v", home.Imported, home.Resource.Imported)
+	}
+	for _, accept := range home.Resource.AcceptAllProfiles {
+		if accept.ProfileID == "work-id" {
+			t.Fatalf("accept-all profile listed at home: %+v", accept)
+		}
+	}
+
+	away := build(&state.Location{Enabled: true, Current: state.LocationAway})
+	if want := build(nil); !reflect.DeepEqual(away, want) {
+		t.Fatalf("away plan = %+v, want %+v", away, want)
+	}
+	if len(away.Imported) == 0 || len(away.Resource.AcceptAllProfiles) != 1 {
+		t.Fatalf("away plan missing accept-all imports: %+v", away)
 	}
 }

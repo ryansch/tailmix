@@ -55,6 +55,7 @@ type Profile struct {
 	WireGuard           *wireguardcfg.Config `json:"wireguard,omitempty"`
 	WireGuardSecretFile string               `json:"wireguardSecretFile,omitempty"`
 	WireGuardShieldsUp  bool                 `json:"wireguardShieldsUp,omitempty"`
+	Location            *Location            `json:"location,omitempty"`
 }
 
 type IPRouteBinding struct {

@@ -3,6 +3,7 @@ package controlapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -425,5 +426,158 @@ func TestHandlerOperatorEndpoints(t *testing.T) {
 	Handler(&recordingBackend{}).ServeHTTP(unsupported, httptest.NewRequest(http.MethodGet, "/v1/operator", nil))
 	if unsupported.Code != http.StatusBadRequest {
 		t.Fatalf("unsupported GET = %d", unsupported.Code)
+	}
+}
+
+type locationBackend struct {
+	recordingBackend
+	call     string
+	name     string
+	gateway  string
+	enabled  bool
+	override string
+}
+
+func (b *locationBackend) result() Profile {
+	return Profile{Name: b.name, RoutesInEffect: true, Location: &ProfileLocation{Enabled: true, Current: "home"}}
+}
+
+func (b *locationBackend) SetProfileLocation(_ context.Context, name string, request SetLocationRequest) (Profile, error) {
+	b.call, b.name, b.enabled = "SetProfileLocation", name, request.Enabled
+	return b.result(), nil
+}
+
+func (b *locationBackend) MarkCurrentNetworkHome(_ context.Context, name string) (Profile, error) {
+	b.call, b.name = "MarkCurrentNetworkHome", name
+	return b.result(), nil
+}
+
+func (b *locationBackend) ForgetHomeNetwork(_ context.Context, name, gateway string) (Profile, error) {
+	b.call, b.name, b.gateway = "ForgetHomeNetwork", name, gateway
+	return b.result(), nil
+}
+
+func (b *locationBackend) SetLocationOverride(_ context.Context, name string, request SetLocationOverrideRequest) (Profile, error) {
+	b.call, b.name, b.override = "SetLocationOverride", name, request.Routes
+	return b.result(), nil
+}
+
+func (b *locationBackend) ClearLocationOverride(_ context.Context, name string) (Profile, error) {
+	b.call, b.name = "ClearLocationOverride", name
+	return b.result(), nil
+}
+
+func TestHandlerLocationEndpoints(t *testing.T) {
+	for _, tc := range []struct {
+		method, path, body string
+		want               locationBackend
+	}{
+		{http.MethodPut, "/v1/profiles/by-name/my%20work/location", `{"enabled":true}`,
+			locationBackend{call: "SetProfileLocation", name: "my work", enabled: true}},
+		{http.MethodPost, "/v1/profiles/by-name/my%20work/location/home-networks/current", "",
+			locationBackend{call: "MarkCurrentNetworkHome", name: "my work"}},
+		{http.MethodDelete, "/v1/profiles/by-name/my%20work/location/home-networks/current", "",
+			locationBackend{call: "ForgetHomeNetwork", name: "my work", gateway: "current"}},
+		{http.MethodDelete, "/v1/profiles/by-name/my%20work/location/home-networks/aa%3Abb%3Acc%3Add%3Aee%3Aff", "",
+			locationBackend{call: "ForgetHomeNetwork", name: "my work", gateway: "aa:bb:cc:dd:ee:ff"}},
+		{http.MethodPut, "/v1/profiles/by-name/my%20work/location/override", `{"routes":"off"}`,
+			locationBackend{call: "SetLocationOverride", name: "my work", override: "off"}},
+		{http.MethodDelete, "/v1/profiles/by-name/my%20work/location/override", "",
+			locationBackend{call: "ClearLocationOverride", name: "my work"}},
+	} {
+		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
+			backend := &locationBackend{}
+			response := httptest.NewRecorder()
+			Handler(backend).ServeHTTP(response, httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body)))
+			if response.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+			}
+			if backend.call != tc.want.call || backend.name != tc.want.name || backend.gateway != tc.want.gateway ||
+				backend.enabled != tc.want.enabled || backend.override != tc.want.override {
+				t.Fatalf("backend = %+v, want %+v", *backend, tc.want)
+			}
+			var got Profile
+			if err := json.NewDecoder(response.Body).Decode(&got); err != nil {
+				t.Fatal(err)
+			}
+			if got.Name != "my work" || !got.RoutesInEffect || got.Location == nil || got.Location.Current != "home" {
+				t.Fatalf("profile = %+v", got)
+			}
+
+			unsupported := httptest.NewRecorder()
+			Handler(&recordingBackend{}).ServeHTTP(unsupported, httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body)))
+			var apiErr Error
+			if err := json.NewDecoder(unsupported.Body).Decode(&apiErr); err != nil {
+				t.Fatal(err)
+			}
+			if unsupported.Code != http.StatusBadRequest || apiErr.Code != "unsupported" {
+				t.Fatalf("unsupported = %d %+v", unsupported.Code, apiErr)
+			}
+		})
+	}
+}
+
+func TestOperatorRoutesLocation(t *testing.T) {
+	routes := OperatorRoutes()
+	for _, tc := range []struct {
+		method, path string
+		allowed      bool
+	}{
+		{http.MethodPost, "/v1/profiles/by-name/work/location/home-networks/current", true},
+		{http.MethodDelete, "/v1/profiles/by-name/work/location/home-networks/current", true},
+		{http.MethodPut, "/v1/profiles/by-name/work/location/override", true},
+		{http.MethodDelete, "/v1/profiles/by-name/work/location/override", true},
+		{http.MethodPut, "/v1/profiles/by-name/work/location", false},
+		{http.MethodDelete, "/v1/profiles/by-name/work/location/home-networks/aa:bb:cc:dd:ee:ff", false},
+		{http.MethodDelete, "/v1/profiles/by-name/work/location/home-networks/aa%3Abb%3Acc%3Add%3Aee%3Aff", false},
+	} {
+		_, pattern := routes.Handler(httptest.NewRequest(tc.method, tc.path, nil))
+		if (pattern != "") != tc.allowed {
+			t.Errorf("%s %s: pattern = %q, want allowed = %v", tc.method, tc.path, pattern, tc.allowed)
+		}
+	}
+}
+
+type handlerTransport struct{ handler http.Handler }
+
+func (t handlerTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	response := httptest.NewRecorder()
+	t.handler.ServeHTTP(response, request)
+	return response.Result(), nil
+}
+
+func TestClientLocationMethods(t *testing.T) {
+	backend := &locationBackend{}
+	client := &Client{http: &http.Client{Transport: handlerTransport{Handler(backend)}}}
+	ctx := context.Background()
+
+	got, err := client.SetProfileLocation(ctx, "my work", SetLocationRequest{Enabled: true})
+	if err != nil || backend.call != "SetProfileLocation" || backend.name != "my work" || !backend.enabled ||
+		got.Location == nil || got.Location.Current != "home" {
+		t.Fatalf("SetProfileLocation = %+v, %v; backend = %+v", got, err, *backend)
+	}
+	if _, err := client.MarkCurrentNetworkHome(ctx, "my work"); err != nil || backend.call != "MarkCurrentNetworkHome" || backend.name != "my work" {
+		t.Fatalf("MarkCurrentNetworkHome: %v; backend = %+v", err, *backend)
+	}
+	if _, err := client.ForgetHomeNetwork(ctx, "my work", "aa:bb:cc:dd:ee:ff"); err != nil ||
+		backend.call != "ForgetHomeNetwork" || backend.gateway != "aa:bb:cc:dd:ee:ff" {
+		t.Fatalf("ForgetHomeNetwork: %v; backend = %+v", err, *backend)
+	}
+	if _, err := client.ForgetHomeNetwork(ctx, "my work", "current"); err != nil || backend.gateway != "current" {
+		t.Fatalf("ForgetHomeNetwork current: %v; backend = %+v", err, *backend)
+	}
+	if _, err := client.SetLocationOverride(ctx, "my work", SetLocationOverrideRequest{Routes: "on"}); err != nil ||
+		backend.call != "SetLocationOverride" || backend.override != "on" {
+		t.Fatalf("SetLocationOverride: %v; backend = %+v", err, *backend)
+	}
+	if _, err := client.ClearLocationOverride(ctx, "my work"); err != nil || backend.call != "ClearLocationOverride" {
+		t.Fatalf("ClearLocationOverride: %v; backend = %+v", err, *backend)
+	}
+
+	unsupported := &Client{http: &http.Client{Transport: handlerTransport{Handler(&recordingBackend{})}}}
+	_, err = unsupported.ClearLocationOverride(ctx, "my work")
+	var apiErr *Error
+	if !errors.As(err, &apiErr) || apiErr.Code != "unsupported" {
+		t.Fatalf("unsupported error = %v", err)
 	}
 }

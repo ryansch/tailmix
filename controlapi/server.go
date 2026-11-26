@@ -65,10 +65,25 @@ type OperatorBackend interface {
 	ClearOperator(context.Context) (Operator, error)
 }
 
+// LocationBackend is implemented by daemons that turn a profile's accept-all
+// routes off while the host is on one of that profile's home networks.
+type LocationBackend interface {
+	SetProfileLocation(ctx context.Context, name string, request SetLocationRequest) (Profile, error)
+	MarkCurrentNetworkHome(ctx context.Context, name string) (Profile, error)
+	// ForgetHomeNetwork removes gateway from the profile's home networks;
+	// gateway "current" removes every gateway seen now.
+	ForgetHomeNetwork(ctx context.Context, name, gateway string) (Profile, error)
+	SetLocationOverride(ctx context.Context, name string, request SetLocationOverrideRequest) (Profile, error)
+	ClearLocationOverride(ctx context.Context, name string) (Profile, error)
+}
+
 // OperatorRoutes returns a handler whose registered patterns are exactly the
 // mutations a configured operator may perform: connecting or disconnecting a
-// profile and selecting or clearing the exit node. Use its Handler method to
-// test whether a request matches.
+// profile, selecting or clearing the exit node, marking or forgetting the
+// current network as a profile's home network, and setting or clearing a
+// profile's location override. Turning location on or off and forgetting a
+// named home network stay root-only. Use its Handler method to test whether a
+// request matches.
 func OperatorRoutes() *http.ServeMux {
 	mux := http.NewServeMux()
 	allowed := http.NotFoundHandler()
@@ -76,6 +91,10 @@ func OperatorRoutes() *http.ServeMux {
 	mux.Handle("POST /v1/profiles/by-name/{name}/disable", allowed)
 	mux.Handle("PUT /v1/exit-node", allowed)
 	mux.Handle("DELETE /v1/exit-node", allowed)
+	mux.Handle("POST /v1/profiles/by-name/{name}/location/home-networks/current", allowed)
+	mux.Handle("DELETE /v1/profiles/by-name/{name}/location/home-networks/current", allowed)
+	mux.Handle("PUT /v1/profiles/by-name/{name}/location/override", allowed)
+	mux.Handle("DELETE /v1/profiles/by-name/{name}/location/override", allowed)
 	return mux
 }
 
@@ -208,6 +227,55 @@ func Handler(backend Backend) http.Handler {
 		purge, _ := strconv.ParseBool(r.URL.Query().Get("purge"))
 		result, backendErr := backend.RemoveProfile(r.Context(), name, purge)
 		writeResult(w, result, backendErr)
+	})
+	locations, hasLocations := backend.(LocationBackend)
+	handleLocation := func(pattern string, serve func(http.ResponseWriter, *http.Request, string)) {
+		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
+			if !hasLocations {
+				writeResult(w, nil, NewError("unsupported", "this daemon does not support profile location"))
+				return
+			}
+			name, err := url.PathUnescape(r.PathValue("name"))
+			if err != nil {
+				writeResult(w, nil, NewError("invalid_request", "invalid escaped profile name"))
+				return
+			}
+			serve(w, r, name)
+		})
+	}
+	handleLocation("PUT /v1/profiles/by-name/{name}/location", func(w http.ResponseWriter, r *http.Request, name string) {
+		var request SetLocationRequest
+		if !decodeRequest(w, r, &request) {
+			return
+		}
+		result, err := locations.SetProfileLocation(r.Context(), name, request)
+		writeResult(w, result, err)
+	})
+	handleLocation("POST /v1/profiles/by-name/{name}/location/home-networks/current", func(w http.ResponseWriter, r *http.Request, name string) {
+		result, err := locations.MarkCurrentNetworkHome(r.Context(), name)
+		writeResult(w, result, err)
+	})
+	// The literal "current" pattern is more specific than {gateway}, so it
+	// wins; OperatorRoutes lists only the literal one.
+	handleLocation("DELETE /v1/profiles/by-name/{name}/location/home-networks/current", func(w http.ResponseWriter, r *http.Request, name string) {
+		result, err := locations.ForgetHomeNetwork(r.Context(), name, "current")
+		writeResult(w, result, err)
+	})
+	handleLocation("DELETE /v1/profiles/by-name/{name}/location/home-networks/{gateway}", func(w http.ResponseWriter, r *http.Request, name string) {
+		result, err := locations.ForgetHomeNetwork(r.Context(), name, r.PathValue("gateway"))
+		writeResult(w, result, err)
+	})
+	handleLocation("PUT /v1/profiles/by-name/{name}/location/override", func(w http.ResponseWriter, r *http.Request, name string) {
+		var request SetLocationOverrideRequest
+		if !decodeRequest(w, r, &request) {
+			return
+		}
+		result, err := locations.SetLocationOverride(r.Context(), name, request)
+		writeResult(w, result, err)
+	})
+	handleLocation("DELETE /v1/profiles/by-name/{name}/location/override", func(w http.ResponseWriter, r *http.Request, name string) {
+		result, err := locations.ClearLocationOverride(r.Context(), name)
+		writeResult(w, result, err)
 	})
 	mux.HandleFunc("POST /v1/wireguard", func(w http.ResponseWriter, r *http.Request) {
 		var request ApplyWireGuardRequest

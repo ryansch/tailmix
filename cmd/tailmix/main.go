@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -57,6 +58,11 @@ type managementClient interface {
 	Operator(context.Context) (controlapi.Operator, error)
 	SetOperator(context.Context, string) (controlapi.Operator, error)
 	ClearOperator(context.Context) (controlapi.Operator, error)
+	SetProfileLocation(context.Context, string, controlapi.SetLocationRequest) (controlapi.Profile, error)
+	MarkCurrentNetworkHome(context.Context, string) (controlapi.Profile, error)
+	ForgetHomeNetwork(context.Context, string, string) (controlapi.Profile, error)
+	SetLocationOverride(context.Context, string, controlapi.SetLocationOverrideRequest) (controlapi.Profile, error)
+	ClearLocationOverride(context.Context, string) (controlapi.Profile, error)
 }
 
 type usageError struct {
@@ -805,9 +811,107 @@ func runRoutes(ctx context.Context, client managementClient, args []string, deps
 			return err
 		}
 		return writeIPMutationResult(deps.stdout, result, jsonOutput)
+	case "location":
+		return runRoutesLocation(ctx, client, args[1:], deps)
 	default:
 		return usageError{fmt.Sprintf("unknown routes command %q", args[0])}
 	}
+}
+
+const acceptAllOffWarning = "routes will stay off everywhere because accept-all is off for this profile"
+
+func runRoutesLocation(ctx context.Context, client managementClient, args []string, deps dependencies) error {
+	if len(args) == 0 || isHelp(args[0]) {
+		fmt.Fprint(deps.stdout, routesLocationHelp)
+		return nil
+	}
+	command, rest := args[0], args[1:]
+	profileName, profileSet, err := takeProfile(&rest)
+	if err != nil {
+		return err
+	}
+	jsonOutput, err := takeBool(&rest, "--json")
+	if err != nil {
+		return err
+	}
+	if command == "show" {
+		return runRoutesLocationShow(ctx, client, profileName, profileSet, rest, jsonOutput, deps)
+	}
+	if !slices.Contains([]string{"enable", "disable", "mark-home", "forget", "override"}, command) {
+		return usageError{fmt.Sprintf("unknown routes location command %q", command)}
+	}
+	if !profileSet {
+		return usageError{fmt.Sprintf("routes location %s requires --profile", command)}
+	}
+
+	var result controlapi.Profile
+	switch command {
+	case "enable", "disable":
+		if err := noOperands(rest); err != nil {
+			return err
+		}
+		result, err = client.SetProfileLocation(ctx, profileName, controlapi.SetLocationRequest{Enabled: command == "enable"})
+	case "mark-home":
+		if err := noOperands(rest); err != nil {
+			return err
+		}
+		result, err = client.MarkCurrentNetworkHome(ctx, profileName)
+	case "forget":
+		gateway := "current"
+		switch {
+		case len(rest) == 1 && !strings.HasPrefix(rest[0], "-"):
+			gateway = rest[0]
+		case len(rest) != 0:
+			return usageError{"usage: tailmix routes location forget --profile <profile> [<gateway>] [--json]"}
+		}
+		result, err = client.ForgetHomeNetwork(ctx, profileName, gateway)
+	case "override":
+		if len(rest) != 1 || !slices.Contains([]string{"on", "off", "clear"}, rest[0]) {
+			return usageError{"routes location override requires on, off, or clear"}
+		}
+		if rest[0] == "clear" {
+			result, err = client.ClearLocationOverride(ctx, profileName)
+		} else {
+			result, err = client.SetLocationOverride(ctx, profileName, controlapi.SetLocationOverrideRequest{Routes: rest[0]})
+		}
+	}
+	if err != nil {
+		return err
+	}
+	if command == "enable" && !result.AcceptAllRoutes && !result.AcceptAllDNSRoutes {
+		fmt.Fprintln(deps.stderr, "warning: "+acceptAllOffWarning)
+	}
+	if jsonOutput {
+		return writeJSON(deps.stdout, result)
+	}
+	writeProfileLocation(deps.stdout, result)
+	return nil
+}
+
+func runRoutesLocationShow(ctx context.Context, client managementClient, profileName string, profileSet bool, rest []string, jsonOutput bool, deps dependencies) error {
+	if err := noOperands(rest); err != nil {
+		return err
+	}
+	if profileSet {
+		result, err := client.Profile(ctx, profileName)
+		if err != nil {
+			return err
+		}
+		if jsonOutput {
+			return writeJSON(deps.stdout, result)
+		}
+		writeProfileLocation(deps.stdout, result)
+		return nil
+	}
+	result, err := client.Profiles(ctx, false)
+	if err != nil {
+		return err
+	}
+	if jsonOutput {
+		return writeJSON(deps.stdout, result)
+	}
+	writeProfileLocations(deps.stdout, result.Profiles)
+	return nil
 }
 
 func runExitNode(ctx context.Context, client managementClient, args []string, deps dependencies) error {
@@ -1390,9 +1494,114 @@ func writeProfiles(w io.Writer, profiles []controlapi.Profile) {
 	_ = table.Flush()
 }
 
+func writeStatusProfiles(w io.Writer, profiles []controlapi.Profile) {
+	table := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(table, "PROFILE\tKIND\tENABLED\tRUNTIME\tTAILNET\tPEERS\tLOCATION\tERROR")
+	for _, profile := range profiles {
+		fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\n",
+			profile.Name, profile.Kind, yesNo(profile.Enabled), profile.RuntimeState,
+			profile.MagicDNSSuffix, profile.PeerCount, statusLocationLabel(profile), profile.LastError)
+	}
+	_ = table.Flush()
+}
+
+// statusLocationLabel is the LOCATION column of tailmix status: the location,
+// whether routes are in effect, and any override, or "-" when location is not
+// enabled.
+func statusLocationLabel(profile controlapi.Profile) string {
+	location := profile.Location
+	if location == nil {
+		return "-"
+	}
+	label := locationName(location.Current) + ", routes " + onOff(profile.RoutesInEffect)
+	if location.Override != "" {
+		label += " (override " + location.Override + ")"
+	}
+	return label
+}
+
+// profileLocationLabel is the short location shown in profile tables: the
+// location with any override appended, or "-" when location is not enabled.
+func profileLocationLabel(location *controlapi.ProfileLocation) string {
+	if location == nil {
+		return "-"
+	}
+	label := locationName(location.Current)
+	if location.Override != "" {
+		label += " (override " + location.Override + ")"
+	}
+	return label
+}
+
+func locationName(current string) string {
+	if current == "" {
+		return "unknown"
+	}
+	return current
+}
+
+func onOff(value bool) string {
+	if value {
+		return "on"
+	}
+	return "off"
+}
+
+func writeProfileLocations(w io.Writer, profiles []controlapi.Profile) {
+	table := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(table, "PROFILE\tLOCATION\tROUTES\tHOME NETWORKS")
+	for _, profile := range profiles {
+		homeNetworks := "-"
+		if profile.Location != nil {
+			homeNetworks = strconv.Itoa(len(profile.Location.HomeNetworks))
+		}
+		fmt.Fprintf(table, "%s\t%s\t%s\t%s\n",
+			profile.Name, profileLocationLabel(profile.Location), onOff(profile.RoutesInEffect), homeNetworks)
+	}
+	_ = table.Flush()
+}
+
+func writeProfileLocation(w io.Writer, profile controlapi.Profile) {
+	table := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
+	rows := [][2]string{{"Profile", profile.Name}}
+	location := profile.Location
+	if location == nil {
+		rows = append(rows, [2]string{"Location routes", "off"})
+	} else {
+		override := "none"
+		if location.Override != "" {
+			override = "routes " + location.Override
+		}
+		homeNetworks := strings.Join(location.HomeNetworks, ", ")
+		if homeNetworks == "" {
+			homeNetworks = "none"
+		}
+		rows = append(rows,
+			[2]string{"Location routes", "on"},
+			[2]string{"Location", locationName(location.Current)},
+			[2]string{"Override", override},
+			[2]string{"Network detected", yesNo(location.NetworkAvailable)},
+			[2]string{"On a home network", yesNo(location.OnHomeNetwork)},
+			[2]string{"Home networks", homeNetworks},
+		)
+		if !location.Supported {
+			rows = append(rows, [2]string{"Detection", "unsupported on this platform"})
+		}
+	}
+	rows = append(rows,
+		[2]string{"Accept all routes", yesNo(profile.AcceptAllRoutes)},
+		[2]string{"Accept all DNS routes", yesNo(profile.AcceptAllDNSRoutes)},
+		[2]string{"Routes in effect", onOff(profile.RoutesInEffect)},
+	)
+	for _, row := range rows {
+		fmt.Fprintf(table, "%s:\t%s\n", row[0], row[1])
+	}
+	_ = table.Flush()
+}
+
 func writeStatus(w io.Writer, status controlapi.Status) {
 	fmt.Fprintf(w, "STATE\t%s\n\n", status.State)
-	writeProfiles(w, status.Profiles)
+	writeStatusProfiles(w, status.Profiles)
 
 	writeStatusSection(w, "IP ROUTES", statusHasIPRoutes(status.IPRoutes), func() {
 		writeIPRoutes(w, status.IPRoutes, false)
@@ -1809,6 +2018,7 @@ const routesHelp = `Usage:
   tailmix routes bind --profile <profile> <prefix>... [--replace] [--json]
   tailmix routes unbind <prefix>... [--profile <expected-profile>] [--json]
   tailmix routes set --profile <profile> --accept-all=<true|false> [--json]
+  tailmix routes location <command> [arguments]
 
 Profile option: -p, --profile <profile>
 
@@ -1817,6 +2027,33 @@ accept-all import. Overridden and conflicting imports are shown by "routes list"
 The default list also includes every detected route; --available shows only
 detected routes.
 Default routes use exit-node policy.
+Location turns a profile's accept-all IP and DNS routes off on its home
+networks; see "tailmix routes location help".
+`
+
+const routesLocationHelp = `Usage:
+  tailmix routes location show [--profile <profile>] [--json]
+  tailmix routes location enable --profile <profile> [--json]
+  tailmix routes location disable --profile <profile> [--json]
+  tailmix routes location mark-home --profile <profile> [--json]
+  tailmix routes location forget --profile <profile> [<gateway>] [--json]
+  tailmix routes location override --profile <profile> <on|off|clear> [--json]
+
+Profile option: -p, --profile <profile>
+
+Location turns a profile's accept-all IP and DNS routes off while this Mac is on
+one of that profile's home networks and back on when it is away. A home network
+is identified by its router's hardware address. Leaving a home network switches
+to away after 60 seconds; losing the network keeps the current location.
+Bindings are not affected. Location never turns on routes that accept-all has
+turned off.
+
+Enable and disable require root; disabling keeps the home networks.
+Mark-home records the current network as home. Forget without a gateway removes
+the current network; forget with a gateway address requires root.
+Override forces routes on or off until the location next changes between home
+and away; clear removes it. The operator may mark, forget the current network,
+and override. Location detection is supported only on macOS.
 `
 
 const exitNodeHelp = `Usage:

@@ -390,6 +390,70 @@ hostname. MagicDNS node answers contain effective IPs. Addresses returned by
 split DNS follow the host's IP routing policy; reaching one through a tailnet
 requires a corresponding installed IP route binding or accept-all import.
 
+### Location-aware routes
+
+A profile can opt in to location-aware routes, so that its accept-all IP and
+DNS route imports are off while this Mac is on one of the profile's home
+networks and on when it is away. This suits a tailnet whose subnet routes cover
+your home LAN: at home the LAN is reached directly, and away it is reached
+through the tailnet. Detection is supported only on macOS; enabling location on
+another platform fails with `unsupported`.
+
+```text
+tailmix routes location show [--profile <name>] [--json]
+tailmix routes location enable --profile <name> [--json]
+tailmix routes location disable --profile <name> [--json]
+tailmix routes location mark-home --profile <name> [--json]
+tailmix routes location forget --profile <name> [<gateway>] [--json]
+tailmix routes location override --profile <name> <on|off|clear> [--json]
+```
+
+A home network is identified by the hardware (MAC) address of its default
+gateway, the router. `mark-home` records the router or routers the Mac is
+using now; it fails with `no_network` when no router is visible. `forget`
+without a gateway removes the current network from the home list; with a
+gateway address, such as `aa:bb:cc:dd:ee:ff`, it removes that entry and fails
+with `not_found` if it is not in the list.
+
+Each opted-in profile has a location of `home`, `away`, or `unknown`:
+
+- Seeing one of the profile's home routers switches to `home` at once, and the
+  profile's accept-all routes turn off.
+- Seeing only other routers switches to `away` after a grace period of 60
+  seconds, so brief roaming does not flap routes. Away, the configured
+  accept-all settings apply. The tailmixd flag `-location-grace` sets the
+  grace period, from `10s` to `10m` (for example `-location-grace=2m`).
+- Losing the network entirely, for example during sleep or an outage, keeps
+  the current location.
+- Before the first detection, the location is `unknown` and the configured
+  settings apply, so that the home LAN stays reachable when away.
+
+The last location and any override are saved and restored when tailmixd
+restarts, so a reboot or update does not change routes by itself.
+
+`override on` uses the configured accept-all settings and `override off` turns
+the routes off, whatever the location. An override holds until the location
+next changes between `home` and `away`; changes to or from `unknown` do not end
+it. `override clear` removes it early. The override can be set while the
+location is `unknown`.
+
+Location only ever turns routes off. It never rewrites the configured
+`--accept-all` values, and on a profile whose IP and DNS accept-all are both
+off, routes stay off everywhere; `enable` warns about this. Exact IP and DNS
+route bindings are not affected by location.
+
+`enable` and `disable` require root. `disable` keeps the home list, so enabling
+again restores it. The operator may run `mark-home`, `forget` for the current
+network, and `override`; `forget` with a gateway address requires root.
+
+`show` without `--profile` lists every profile's location, whether routes are
+in effect, and how many home networks it has. With `--profile`, it also lists
+the stored home networks. `tailmix status` adds a `LOCATION` column to the
+profile table: `home`, `away`, or `unknown`, then whether routes are in effect
+(`routes on` or `routes off`), followed by `(override on)` or `(override off)`
+when an override is active, for example `away, routes on (override on)`. The
+column shows `-` when the profile does not use location.
+
 ### DNS search domains
 
 Search domains are daemon-wide ordered policy, not profile names or aliases.
@@ -622,7 +686,8 @@ Initial codes should include `invalid_request`, `profile_exists`,
 `exit_node_not_found`, `exit_node_ambiguous`, `exit_node_unavailable`,
 `profile_unavailable`,
 `profile_has_bindings`, `permission_denied`, `runtime_start_failed`,
-`dns_configuration_failed`, `reconcile_failed`, and `purge_failed`.
+`dns_configuration_failed`, `reconcile_failed`, `purge_failed`,
+`unsupported`, `no_network`, and `not_found`.
 
 ## Daemon control API
 
@@ -644,9 +709,11 @@ credentials rather than relying on filesystem mode alone. On platforms without
 Unix peer credentials, the socket remains owner-only.
 
 Root can name one non-root operator UID (`tailmix operator set`). The operator
-may also connect and disconnect profiles (`enable`, `disable`) and select or
-clear the exit node, which is what the macOS menu bar app needs. Every other
-mutation, including changing the operator, still requires root.
+may also connect and disconnect profiles (`enable`, `disable`), select or
+clear the exit node, mark the current network as home, forget the current
+network, and set or clear a location override, which is what the macOS menu bar
+app needs. Every other mutation, including changing the operator, still
+requires root.
 
 ### Endpoints
 
@@ -665,6 +732,12 @@ POST   /v1/profiles/by-name/{escaped-profile-name}/enable
 POST   /v1/profiles/by-name/{escaped-profile-name}/disable
 POST   /v1/profiles/by-name/{escaped-profile-name}/restart
 DELETE /v1/profiles/by-name/{escaped-profile-name}?purge=false
+PUT    /v1/profiles/by-name/{escaped-profile-name}/location
+POST   /v1/profiles/by-name/{escaped-profile-name}/location/home-networks/current
+DELETE /v1/profiles/by-name/{escaped-profile-name}/location/home-networks/current
+DELETE /v1/profiles/by-name/{escaped-profile-name}/location/home-networks/{gateway}
+PUT    /v1/profiles/by-name/{escaped-profile-name}/location/override
+DELETE /v1/profiles/by-name/{escaped-profile-name}/location/override
 
 GET    /v1/routes
 PUT    /v1/routes
@@ -720,6 +793,26 @@ The profile resource separates desired state from observed state:
 `runtimeState` is one of `disabled`, `starting`, `needs-login`, `running`,
 `stopping`, or `error`. It is tailmix lifecycle state; `backendState` is the
 profile's upstream Tailscale state.
+
+`acceptAllRoutes` and `acceptAllDnsRoutes` are the configured values.
+`routesInEffect` reports whether either accept-all import is in effect after
+location is applied. A profile that uses location also has a `location` object:
+
+```json
+"location": {
+  "supported": true,
+  "enabled": true,
+  "current": "home",
+  "override": "on",
+  "homeNetworks": ["aa:bb:cc:dd:ee:ff"],
+  "networkAvailable": true,
+  "onHomeNetwork": true
+}
+```
+
+`current` is `home`, `away`, or `unknown`; `override` is `on`, `off`, or
+absent. `networkAvailable` reports whether a router is visible now and
+`onHomeNetwork` whether one of them is in `homeNetworks`.
 
 IP and DNS route resources report the persisted binding and its current
 realization together:
